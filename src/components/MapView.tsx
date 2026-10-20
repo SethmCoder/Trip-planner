@@ -24,11 +24,20 @@ export default function MapView({ pins, segments = [], onPinClick, showRoute = f
       // Draw the quickest route's real path when we have it; otherwise a direct line
       const line: L.LatLng[] = s.path && s.path.length > 1 ? s.path.map(p => L.latLng(p.lat, p.lng)) : [a, b]
       line.forEach(p => pts.push(p))
-      L.polyline(line, { color: '#f76d11', weight: 5, opacity: 0.95 }).bindPopup(s.label).addTo(layer)
+      // Split the line where it crosses the antimeridian (+/-180 longitude, e.g. Pacific flights)
+      // so it wraps around the map edge instead of streaking the long way across the world
+      const groups: L.LatLng[][] = [[line[0]]]
+      for (let i = 1; i < line.length; i++) {
+        if (Math.abs(line[i].lng - line[i - 1].lng) > 180) groups.push([line[i]])
+        else groups[groups.length - 1].push(line[i])
+      }
+      groups.forEach(g => { if (g.length > 1) L.polyline(g, { color: '#f76d11', weight: 5, opacity: 0.95 }).bindPopup(s.label).addTo(layer) })
       L.circleMarker(a, { radius: 6, color: '#000000', weight: 2, fillColor: '#f76d11', fillOpacity: 1 }).bindPopup(s.label).addTo(layer)
       L.circleMarker(b, { radius: 6, color: '#000000', weight: 2, fillColor: '#ffffff', fillOpacity: 1 }).bindPopup(s.label).addTo(layer)
-      const midIdx = Math.floor(line.length / 2)
-      arrowAt(line[Math.max(0, midIdx - 1)], line[Math.min(line.length - 1, midIdx)]).addTo(layer)
+      // Direction arrow at the route's midpoint (using a pair of points that don't straddle the map edge)
+      let midIdx = Math.floor(line.length / 2)
+      while (midIdx > 0 && Math.abs(line[midIdx].lng - line[midIdx - 1].lng) > 180) midIdx--
+      arrowAt(line[Math.max(0, midIdx - 1)], line[midIdx]).addTo(layer)
     })
     pins.forEach(p => {
       pts.push([p.lat, p.lng])
