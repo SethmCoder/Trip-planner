@@ -26,11 +26,8 @@ export async function calculateTransitMinutes(from: LatLng | null, to: LatLng | 
   }
   if (from && to) {
     try {
-      const url = `https://router.project-osrm.org/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=false`
-      const r = await fetch(url)
-      const j = await r.json()
-      const route = j?.routes?.[0]
-      if (route?.duration) return { minutes: Math.round(route.duration / 60), source: 'route calculated with OpenStreetMap (OSRM)' }
+      const quickest = await getQuickestRoute(from, to, mode)
+      if (quickest) return { minutes: quickest.minutes, source: quickest.source }
     } catch { /* fall through to estimate */ }
     const km = haversineKm(from, to)
     return { minutes: Math.max(5, Math.round(km / 50 * 60)), source: 'estimated from distance' }
@@ -40,6 +37,35 @@ export async function calculateTransitMinutes(from: LatLng | null, to: LatLng | 
     if (diff > 0) return { minutes: diff, source: 'from departure/arrival times' }
   }
   return null
+}
+
+export interface RouteResult { minutes: number; distanceKm: number; path: LatLng[]; source: string }
+
+/**
+ * Quickest route between two stops.
+ * Ground modes: asks OSRM for up to 3 alternative routes and picks the one with the
+ * shortest duration; `path` is that route's real road geometry so the map can draw it.
+ * Airplane: the "route" is a direct line (great-circle), timed by flight estimate.
+ */
+export async function getQuickestRoute(from: LatLng, to: LatLng, mode: string): Promise<RouteResult | null> {
+  if (isFlight(mode)) {
+    const km = haversineKm(from, to)
+    return { minutes: Math.max(20, Math.round(km / 750 * 60) + 30), distanceKm: km, path: [from, to], source: 'direct flight (estimated)' }
+  }
+  try {
+    const url = `https://router.project-osrm.org/route/v1/driving/${from.lng},${from.lat};${to.lng},${to.lat}?overview=full&geometries=geojson&alternatives=3&steps=false`
+    const r = await fetch(url)
+    const j = await r.json()
+    const routes: any[] = j?.routes ?? []
+    if (routes.length) {
+      const quickest = routes.reduce((best, rt) => (rt.duration < best.duration ? rt : best), routes[0])
+      const coords: [number, number][] = quickest.geometry?.coordinates ?? []
+      const path = coords.map(([lng, lat]) => ({ lat, lng }))
+      return { minutes: Math.round(quickest.duration / 60), distanceKm: (quickest.distance ?? 0) / 1000, path: path.length > 1 ? path : [from, to], source: 'quickest route calculated with OpenStreetMap (OSRM)' }
+    }
+  } catch { /* fall through */ }
+  const km = haversineKm(from, to)
+  return { minutes: Math.max(5, Math.round(km / 50 * 60)), distanceKm: km, path: [from, to], source: 'estimated from distance' }
 }
 
 /** Airplane: "2:35" (hour:minute). Everything else: minutes, e.g. "95". */

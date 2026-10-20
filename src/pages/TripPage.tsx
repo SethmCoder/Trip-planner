@@ -9,7 +9,7 @@ import * as api from '../lib/data'
 import { searchPlaces, type GeoResult } from '../lib/geocoding'
 import { bookingLink } from '../lib/bookingLinks'
 import { newId, fmtDate, type Trip, type ItineraryItem } from '../lib/types'
-import { calculateTransitMinutes, formatTransitTime, parseTransitTime, isFlight, addMinutes } from '../lib/routing'
+import { calculateTransitMinutes, formatTransitTime, parseTransitTime, isFlight, addMinutes, getQuickestRoute, type LatLng } from '../lib/routing'
 
 const baseItem = (trip: Trip, userId: string, order: number): ItineraryItem => ({ id: newId(), trip_id: trip.id, user_id: userId, type: 'activity', group_id: null, title: '', place_name: '', lat: trip.place_lat, lng: trip.place_lng, from_name: '', from_lat: null, from_lng: null, to_name: '', to_lat: null, to_lng: null, start_at: `${trip.start_date}T09:00`, end_at: `${trip.start_date}T10:00`, duration_minutes: 60, mode_of_transport: '', booking_status: 'not_booked', image_url: '', sort_order: order, created_at: new Date().toISOString() })
 function PlaceSearch({ label, onPick }: { label: string; onPick: (r: GeoResult) => void }) {
@@ -21,7 +21,7 @@ function PlaceSearch({ label, onPick }: { label: string; onPick: (r: GeoResult) 
 export default function TripPage() {
   const { id } = useParams(); const { profile } = useAuth(); const nav = useNavigate()
   const [trip, setTrip] = useState<Trip | null>(null); const [items, setItems] = useState<ItineraryItem[]>([])
-  const [divide, setDivide] = useState(false); const [dragId, setDragId] = useState<string | null>(null)
+  const [divide, setDivide] = useState(false); const [dragId, setDragId] = useState<string | null>(null); const [expandedId, setExpandedId] = useState<string | null>(null)
   const [from, setFrom] = useState<GeoResult | null>(null); const [to, setTo] = useState<GeoResult | null>(null); const [mode, setMode] = useState('Airplane')
   const [tStart, setTStart] = useState(''); const [tEnd, setTEnd] = useState('')
   const [hotel, setHotel] = useState<GeoResult | null>(null); const [hIn, setHIn] = useState(''); const [hOut, setHOut] = useState('')
@@ -29,9 +29,26 @@ export default function TripPage() {
   useEffect(() => { if (id) { api.getTrip(id).then(t => { setTrip(t); if (t) { setTStart(`${t.start_date}T09:00`); setTEnd(`${t.start_date}T11:00`); setHIn(`${t.start_date}T15:00`); setHOut(`${t.end_date}T11:00`); setATime(`${t.start_date}T10:00`) } }); api.listItems(id).then(setItems) } }, [id])
   // NOTE: all hooks must run before any early return, or React crashes ("rendered more hooks") to a blank screen when the trip loads
   const days = useMemo(() => { const out: string[] = []; if (!trip) return out; if (trip.start_date && trip.end_date) { const d = new Date(trip.start_date + 'T12:00:00'); const end = new Date(trip.end_date + 'T12:00:00'); while (d <= end && out.length < 60) { out.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1) } } return out.length ? out : [trip.start_date] }, [trip])
+  // Quickest-route geometry for each transit leg, fetched from OSRM and drawn on the map
+  const [routePaths, setRoutePaths] = useState<Record<string, LatLng[]>>({})
+  const transitSignature = items.filter(i => i.type === 'transit' && i.from_lat != null && i.to_lat != null).map(i => `${i.id}:${i.from_lat},${i.from_lng}->${i.to_lat},${i.to_lng}:${i.mode_of_transport}`).join('|')
+  useEffect(() => {
+    let cancelled = false
+    const legs = items.filter(i => i.type === 'transit' && i.from_lat != null && i.from_lng != null && i.to_lat != null && i.to_lng != null)
+    legs.forEach(async leg => {
+      const route = await getQuickestRoute({ lat: leg.from_lat!, lng: leg.from_lng! }, { lat: leg.to_lat!, lng: leg.to_lng! }, leg.mode_of_transport)
+      if (!cancelled && route && route.path.length > 1) setRoutePaths(prev => ({ ...prev, [leg.id]: route.path }))
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transitSignature])
   if (!profile) return null; if (!trip) return <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}><TopBar /><p style={{ padding: 20 }}>Loading trip… <button className="btn-outline btn-small" onClick={() => nav('/')}>Back</button></p></div>
   const saveT = async (t: Trip) => { setTrip(t); await api.saveTrip(t) }
-  const addItems = async (news: ItineraryItem[]) => { const all = [...items, ...news]; setItems(all); await api.saveItems(news) }
+  const deleteThisTrip = async () => {
+    if (!window.confirm(`Delete "${trip.name || 'Untitled Trip'}" and all of its itinerary items? This cannot be undone.`)) return
+    try { await api.deleteTrip(trip.id); nav('/') } catch (x: any) { alert(`Could not delete the trip: ${x.message}`) }
+  }
+  const addItems = async (news: ItineraryItem[]) => { const all = [...items, ...news]; setItems(all); if (news[0]) setExpandedId(news[0].id); await api.saveItems(news) }
   const update = async (it: ItineraryItem) => {
     let all = items.map(x => x.id === it.id ? it : x)
     if (it.type === 'hotel' && it.group_id) all = all.map(x => x.group_id === it.group_id && x.id !== it.id ? { ...x, title: it.title, place_name: it.place_name, booking_status: it.booking_status } : x)
@@ -59,15 +76,41 @@ export default function TripPage() {
   const addActivity = () => { if (!act) return alert('Pick a place to visit'); addItems([{ ...baseItem(trip, profile.id, items.length), type: 'activity', title: act.name, place_name: act.display, lat: act.lat, lng: act.lng, start_at: aTime, end_at: aTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(act.name)}/400/220` }]) }
   const ordered = [...items].sort((a, b) => a.sort_order - b.sort_order)
   const pins = ordered.filter(i => i.lat != null).map((i, ix) => ({ id: i.id, lat: i.lat!, lng: i.lng!, label: `<b>${i.title}</b><br/>${i.place_name}`, number: ix + 1 }))
-  const segments = ordered.filter(i => i.type === 'transit' && i.from_lat != null && i.from_lng != null && i.to_lat != null && i.to_lng != null).map(i => ({ id: i.id, fromLat: i.from_lat!, fromLng: i.from_lng!, toLat: i.to_lat!, toLng: i.to_lng!, label: `<b>${i.title}</b><br/>${i.from_name} → ${i.to_name}${i.mode_of_transport ? `<br/>${i.mode_of_transport}` : ''}` }))
+  const segments = ordered.filter(i => i.type === 'transit' && i.from_lat != null && i.from_lng != null && i.to_lat != null && i.to_lng != null).map(i => ({ id: i.id, fromLat: i.from_lat!, fromLng: i.from_lng!, toLat: i.to_lat!, toLng: i.to_lng!, path: routePaths[i.id], label: `<b>${i.title}</b><br/>${i.from_name} → ${i.to_name}${i.mode_of_transport ? `<br/>${i.mode_of_transport}` : ''}<br/>Quickest route` }))
   const dayLoad = (day: string) => { const di = ordered.filter(i => i.start_at.slice(0, 10) === day); return { count: di.length, mins: di.reduce((s, i) => s + (i.duration_minutes || 60), 0), items: di } }
   const leastFullDay = days.reduce((best, d) => dayLoad(d).count < dayLoad(best).count ? d : best, days[0])
   const moveItem = async (it: ItineraryItem, toDay: string) => { const moved = { ...it, start_at: toDay + it.start_at.slice(10), end_at: it.end_at ? toDay + it.end_at.slice(10) : it.end_at }; await update(moved) }
   const onDrop = async (targetId: string) => { if (!dragId || dragId === targetId) return; const arr = [...ordered]; const a = arr.findIndex(x => x.id === dragId), b = arr.findIndex(x => x.id === targetId); const [m] = arr.splice(a, 1); arr.splice(b, 0, m); arr.forEach((x, i) => x.sort_order = i); setItems(arr); await api.saveItems(arr) }
+  const fmtWhen = (iso: string) => iso ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
+  const bookingBadge = (s: ItineraryItem['booking_status']) => s === 'booked'
+    ? <span style={{ background: 'var(--black)', color: '#fff', borderRadius: 999, padding: '2px 8px', fontSize: 11, fontWeight: 700, flex: 'none' }}>Booked</span>
+    : s === 'partially_booked'
+      ? <span style={{ background: '#fff', color: 'var(--orange)', border: '1px solid var(--orange)', borderRadius: 999, padding: '2px 8px', fontSize: 11, fontWeight: 700, flex: 'none' }}>Partially Booked</span>
+      : <span style={{ background: 'var(--orange)', color: '#fff', borderRadius: 999, padding: '2px 8px', fontSize: 11, fontWeight: 700, flex: 'none' }}>Not Booked</span>
+  const summaryOf = (it: ItineraryItem) => {
+    if (it.type === 'transit') return `${it.from_name || '?'} → ${it.to_name || '?'}${it.mode_of_transport ? ` · ${it.mode_of_transport}` : ''}${it.start_at ? ` · ${fmtWhen(it.start_at)}` : ''}${it.duration_minutes != null ? ` · ${formatTransitTime(it.duration_minutes, it.mode_of_transport)}${isFlight(it.mode_of_transport) ? '' : ' min'}` : ''}`
+    if (it.type === 'hotel') return `${it.place_name || ''}${it.start_at ? ` · ${it.subtype === 'checkout' ? 'Check-out' : 'Check-in'} ${fmtWhen(it.start_at)}` : ''}`
+    return `${it.place_name || ''}${it.start_at ? ` · ${fmtWhen(it.start_at)}` : ''}`
+  }
   const card = (it: ItineraryItem) => {
     const link = bookingLink(it)
+    const isOpen = expandedId === it.id
+    const toggle = () => setExpandedId(isOpen ? null : it.id)
     return <div key={it.id} draggable onDragStart={() => setDragId(it.id)} onDragOver={e => e.preventDefault()} onDrop={() => onDrop(it.id)} style={{ border: '1px solid var(--black)', borderLeft: '6px solid var(--orange)', borderRadius: 8, padding: 10, marginBottom: 10, background: '#fff', cursor: 'grab' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6 }}><strong style={{ fontSize: 14 }}>⠿ {it.type === 'transit' ? '✈ Transit' : it.type === 'hotel' ? '🏨 Hotel/Stay' : '📍 Things to Do'}</strong><button onClick={() => remove(it)} style={{ border: 'none', background: 'none', fontWeight: 800 }}>✕</button></div>
+      <div onClick={toggle} title={isOpen ? 'Click to collapse' : 'Click to expand'} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 6, cursor: 'pointer' }}>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#555' }}>⠿ {it.type === 'transit' ? '✈ TRANSIT' : it.type === 'hotel' ? '🏨 HOTEL / STAY' : '📍 THINGS TO DO'}</div>
+          <div style={{ fontWeight: 800, fontSize: 15, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.title || 'Untitled'}</div>
+          <div style={{ fontSize: 12, color: '#333', marginTop: 2 }}>{summaryOf(it)}</div>
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 'none' }}>
+          {bookingBadge(it.booking_status)}
+          <button type="button" aria-label={isOpen ? 'Collapse' : 'Expand'} onClick={e => { e.stopPropagation(); toggle() }} style={{ border: '1px solid var(--black)', background: '#fff', borderRadius: 6, width: 26, height: 26, fontWeight: 800 }}>{isOpen ? '▾' : '▸'}</button>
+          <button type="button" aria-label="Delete item" title="Delete item" onClick={e => { e.stopPropagation(); if (window.confirm(`Delete "${it.title || 'this item'}"?`)) remove(it) }} style={{ border: 'none', background: 'none', fontWeight: 800, color: '#c00' }}>✕</button>
+        </div>
+      </div>
+      {!isOpen && it.type === 'activity' && it.image_url && <img src={it.image_url} alt={it.title} style={{ width: '100%', height: 70, objectFit: 'cover', borderRadius: 6, marginTop: 8 }} />}
+      {isOpen && <>
       <label>Name / Title</label><input value={it.title} onChange={e => update({ ...it, title: e.target.value })} />
       {it.type === 'transit' && <><label>From</label><input value={it.from_name} onChange={e => update({ ...it, from_name: e.target.value })} /><label>To</label><input value={it.to_name} onChange={e => update({ ...it, to_name: e.target.value })} /><label>Mode of Transportation</label><input value={it.mode_of_transport} onChange={e => update({ ...it, mode_of_transport: e.target.value })} placeholder="Airplane, Train, Bus, Public Transit…" /><label>Departure</label><input type="datetime-local" value={it.start_at} onChange={e => update({ ...it, start_at: e.target.value })} /><label>Arrival</label><input type="datetime-local" value={it.end_at} onChange={e => { const end = e.target.value; update({ ...it, end_at: end, duration_minutes: it.start_at && end ? Math.max(0, Math.round((+new Date(end) - +new Date(it.start_at)) / 60000)) : it.duration_minutes }) }} /><TransitTimeInput minutes={it.duration_minutes} mode={it.mode_of_transport} onChange={mins => update({ ...it, duration_minutes: mins })} /><button type="button" className="btn-outline btn-small" style={{ marginTop: 8 }} onClick={() => recalcTransit(it)}>Calculate Transit Time</button></>}
       {it.type === 'hotel' && <><label>Hotel Name</label><input value={it.title.replace(/ \((Check-in|Check-out)\)$/, '')} onChange={e => update({ ...it, title: `${e.target.value} (${it.subtype === 'checkout' ? 'Check-out' : 'Check-in'})` })} /><label>Place</label><input value={it.place_name} onChange={e => update({ ...it, place_name: e.target.value })} /><p style={{ fontSize: 12, margin: '6px 0' }}>{it.subtype === 'checkout' ? 'End of stay (Check-out)' : 'Beginning of stay (Check-in)'}: <b>{fmtDate(it.start_at)}</b></p><label>{it.subtype === 'checkout' ? 'Check-out' : 'Check-in'} Date &amp; Time</label><input type="datetime-local" value={it.start_at} onChange={e => update({ ...it, start_at: e.target.value, end_at: e.target.value })} /></>}
@@ -75,6 +118,8 @@ export default function TripPage() {
       {(it.type !== 'transit') && it.type !== 'hotel' ? null : null}
       <label>Booking Status</label><select value={it.booking_status} onChange={e => update({ ...it, booking_status: e.target.value as ItineraryItem['booking_status'] })}><option value="not_booked">Not Booked</option><option value="partially_booked">Partially Booked</option><option value="booked">Booked</option></select>
       {link && <a href={link.url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 8, color: 'var(--orange)', fontWeight: 700, fontSize: 13 }}>{link.label} ↗</a>}
+      <button type="button" className="btn-outline btn-small" onClick={() => { if (window.confirm(`Delete "${it.title || 'this item'}"?`)) remove(it) }} style={{ display: 'block', marginTop: 12, color: '#c00', borderColor: '#c00' }}>Delete Item</button>
+      </>}
     </div>
   }
   return (
@@ -82,6 +127,7 @@ export default function TripPage() {
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <aside className="panel" style={{ flex: '0 0 250px', borderRadius: 0 }}>
           <button className="btn-outline btn-small" onClick={() => nav('/')}>← All Trips</button>
+          <button className="btn-outline btn-small" onClick={deleteThisTrip} style={{ marginLeft: 8, color: '#c00', borderColor: '#c00' }}>Delete Trip</button>
           <h3 style={{ fontFamily: "'Courier New',monospace" }}>Create Items</h3>
           <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6 }}><h4>Transit</h4><PlaceSearch label="From" onPick={setFrom} /><PlaceSearch label="To" onPick={setTo} /><label>Mode</label><input value={mode} onChange={e => setMode(e.target.value)} /><label>Departure</label><input type="datetime-local" value={tStart} onChange={e => setTStart(e.target.value)} /><label>Arrival</label><input type="datetime-local" value={tEnd} onChange={e => setTEnd(e.target.value)} /><button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addTransit}>Add Transit</button></div>
           <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}><h4>Hotel / Stay</h4><PlaceSearch label="Hotel / Place" onPick={setHotel} /><label>Beginning of Stay</label><input type="datetime-local" value={hIn} onChange={e => setHIn(e.target.value)} /><label>End of Stay</label><input type="datetime-local" value={hOut} onChange={e => setHOut(e.target.value)} /><button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addHotel}>Add Hotel / Stay</button><p style={{ fontSize: 11 }}>Adds a check-in and a check-out card.</p></div>

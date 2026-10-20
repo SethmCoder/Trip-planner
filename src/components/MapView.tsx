@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import L from 'leaflet'
 export interface MapPin { id: string; lat: number; lng: number; label: string; number?: number }
-export interface MapSegment { id: string; fromLat: number; fromLng: number; toLat: number; toLng: number; label: string }
+export interface MapSegment { id: string; fromLat: number; fromLng: number; toLat: number; toLng: number; label: string; path?: { lat: number; lng: number }[] }
 const arrowAt = (a: L.LatLng, b: L.LatLng) => {
   const mid = L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2)
   const angle = Math.atan2(b.lng - a.lng, b.lat - a.lat) * 180 / Math.PI // 0 = north; arrow glyph points east
@@ -21,11 +21,14 @@ export default function MapView({ pins, segments = [], onPinClick, showRoute = f
     // Transit legs: a direct line between the departure and arrival stops, with endpoint dots and a direction arrow
     segments.forEach(s => {
       const a = L.latLng(s.fromLat, s.fromLng), b = L.latLng(s.toLat, s.toLng)
-      pts.push(a, b)
-      L.polyline([a, b], { color: '#f76d11', weight: 5, opacity: 0.95 }).bindPopup(s.label).addTo(layer)
+      // Draw the quickest route's real path when we have it; otherwise a direct line
+      const line: L.LatLng[] = s.path && s.path.length > 1 ? s.path.map(p => L.latLng(p.lat, p.lng)) : [a, b]
+      line.forEach(p => pts.push(p))
+      L.polyline(line, { color: '#f76d11', weight: 5, opacity: 0.95 }).bindPopup(s.label).addTo(layer)
       L.circleMarker(a, { radius: 6, color: '#000000', weight: 2, fillColor: '#f76d11', fillOpacity: 1 }).bindPopup(s.label).addTo(layer)
       L.circleMarker(b, { radius: 6, color: '#000000', weight: 2, fillColor: '#ffffff', fillOpacity: 1 }).bindPopup(s.label).addTo(layer)
-      arrowAt(a, b).addTo(layer)
+      const midIdx = Math.floor(line.length / 2)
+      arrowAt(line[Math.max(0, midIdx - 1)], line[Math.min(line.length - 1, midIdx)]).addTo(layer)
     })
     pins.forEach(p => {
       pts.push([p.lat, p.lng])

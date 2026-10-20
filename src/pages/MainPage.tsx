@@ -8,7 +8,7 @@ import * as api from '../lib/data'
 import { searchPlaces } from '../lib/geocoding'
 import { newId, type Trip } from '../lib/types'
 
-function TripCard({ trip, onChange, onOpen }: { trip: Trip; onChange: (t: Trip) => void; onOpen: () => void }) {
+function TripCard({ trip, onChange, onOpen, onDelete }: { trip: Trip; onChange: (t: Trip) => void; onOpen: () => void; onDelete: (t: Trip) => void }) {
   const [placeQ, setPlaceQ] = useState(trip.place); const [results, setResults] = useState<any[]>([])
   const upd = (p: Partial<Trip>) => onChange({ ...trip, ...p })
   return (
@@ -24,6 +24,7 @@ function TripCard({ trip, onChange, onOpen }: { trip: Trip; onChange: (t: Trip) 
       <label>Booking Status</label>
       <select value={trip.booking_status} onChange={e => upd({ booking_status: e.target.value as Trip['booking_status'] })}><option value="not_booked">Not Booked</option><option value="partially_booked">Partially Booked</option><option value="booked">Booked</option></select>
       <button className="btn-orange" style={{ width: '100%', marginTop: 12 }} onClick={onOpen}>Open Trip</button>
+      <button className="btn-outline" style={{ width: '100%', marginTop: 8, color: '#c00', borderColor: '#c00' }} onClick={() => onDelete(trip)}>Delete Trip</button>
     </div>
   )
 }
@@ -36,6 +37,10 @@ export default function MainPage() {
     try { await api.saveTrip(t); setTrips(p => [...p, t]) } catch (x: any) { alert(`Could not create the trip: ${x.message}`) }
   }
   const change = async (t: Trip) => { setTrips(p => p.map(x => x.id === t.id ? t : x)); await api.saveTrip(t) }
+  const deleteTrip = async (t: Trip) => {
+    if (!window.confirm(`Delete "${t.name || 'Untitled Trip'}" and all of its itinerary items? This cannot be undone.`)) return
+    try { await api.deleteTrip(t.id); setTrips(p => p.filter(x => x.id !== t.id)) } catch (x: any) { alert(`Could not delete the trip: ${x.message}`) }
+  }
   const pins = trips.filter(t => t.place_lat != null).map(t => ({ id: t.id, lat: t.place_lat!, lng: t.place_lng!, label: `<b>${t.name}</b><br/>${t.place}` }))
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
@@ -44,7 +49,7 @@ export default function MainPage() {
         <aside className="panel" style={{ flex: '0 0 16.6%', minWidth: 220, borderRadius: 0, borderTop: 'none', borderLeft: 'none', borderBottom: 'none' }}>
           <h2 style={{ marginTop: 4, fontFamily: "'Courier New',monospace" }}>Your Trips</h2>
           {trips.length === 0 && <p style={{ fontSize: 13 }}>No trips yet. Create your first trip!</p>}
-          {trips.map(t => <TripCard key={t.id} trip={t} onChange={change} onOpen={() => nav(`/trip/${t.id}`)} />)}
+          {trips.map(t => <TripCard key={t.id} trip={t} onChange={change} onOpen={() => nav(`/trip/${t.id}`)} onDelete={deleteTrip} />)}
         </aside>
         <MapView pins={pins} onPinClick={id => nav(`/trip/${id}`)}>
           <button className="btn-orange" onClick={create} style={{ position: 'absolute', top: 12, left: 54, zIndex: 500, boxShadow: '0 2px 8px rgba(0,0,0,.4)' }}>Create New Trip</button>
