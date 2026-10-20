@@ -33,7 +33,7 @@ export default function MainPage() {
   if (!profile) return null
   const create = async () => {
     const t: Trip = { id: newId(), user_id: profile.id, name: 'New Trip', place: '', place_lat: null, place_lng: null, start_date: new Date().toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10), major_stops: [], booking_status: 'not_booked', created_at: new Date().toISOString() }
-    await api.saveTrip(t); setTrips(p => [...p, t])
+    try { await api.saveTrip(t); setTrips(p => [...p, t]) } catch (x: any) { alert(`Could not create the trip: ${x.message}`) }
   }
   const change = async (t: Trip) => { setTrips(p => p.map(x => x.id === t.id ? t : x)); await api.saveTrip(t) }
   const pins = trips.filter(t => t.place_lat != null).map(t => ({ id: t.id, lat: t.place_lat!, lng: t.place_lng!, label: `<b>${t.name}</b><br/>${t.place}` }))

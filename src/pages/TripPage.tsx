@@ -25,6 +25,8 @@ export default function TripPage() {
   const [hotel, setHotel] = useState<GeoResult | null>(null); const [hIn, setHIn] = useState(''); const [hOut, setHOut] = useState('')
   const [act, setAct] = useState<GeoResult | null>(null); const [aTime, setATime] = useState('')
   useEffect(() => { if (id) { api.getTrip(id).then(t => { setTrip(t); if (t) { setTStart(`${t.start_date}T09:00`); setTEnd(`${t.start_date}T11:00`); setHIn(`${t.start_date}T15:00`); setHOut(`${t.end_date}T11:00`); setATime(`${t.start_date}T10:00`) } }); api.listItems(id).then(setItems) } }, [id])
+  // NOTE: all hooks must run before any early return, or React crashes ("rendered more hooks") to a blank screen when the trip loads
+  const days = useMemo(() => { const out: string[] = []; if (!trip) return out; if (trip.start_date && trip.end_date) { const d = new Date(trip.start_date + 'T12:00:00'); const end = new Date(trip.end_date + 'T12:00:00'); while (d <= end && out.length < 60) { out.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1) } } return out.length ? out : [trip.start_date] }, [trip])
   if (!profile) return null; if (!trip) return <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}><TopBar /><p style={{ padding: 20 }}>Loading trip… <button className="btn-outline btn-small" onClick={() => nav('/')}>Back</button></p></div>
   const saveT = async (t: Trip) => { setTrip(t); await api.saveTrip(t) }
   const addItems = async (news: ItineraryItem[]) => { const all = [...items, ...news]; setItems(all); await api.saveItems(news) }
@@ -39,7 +41,6 @@ export default function TripPage() {
   const addActivity = () => { if (!act) return alert('Pick a place to visit'); addItems([{ ...baseItem(trip, profile.id, items.length), type: 'activity', title: act.name, place_name: act.display, lat: act.lat, lng: act.lng, start_at: aTime, end_at: aTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(act.name)}/400/220` }]) }
   const ordered = [...items].sort((a, b) => a.sort_order - b.sort_order)
   const pins = ordered.filter(i => i.lat != null).map((i, ix) => ({ id: i.id, lat: i.lat!, lng: i.lng!, label: `<b>${i.title}</b><br/>${i.place_name}`, number: ix + 1 }))
-  const days = useMemo(() => { const out: string[] = []; if (trip.start_date && trip.end_date) { const d = new Date(trip.start_date + 'T12:00:00'); const end = new Date(trip.end_date + 'T12:00:00'); while (d <= end && out.length < 60) { out.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1) } } return out.length ? out : [trip.start_date] }, [trip])
   const dayLoad = (day: string) => { const di = ordered.filter(i => i.start_at.slice(0, 10) === day); return { count: di.length, mins: di.reduce((s, i) => s + (i.duration_minutes || 60), 0), items: di } }
   const leastFullDay = days.reduce((best, d) => dayLoad(d).count < dayLoad(best).count ? d : best, days[0])
   const moveItem = async (it: ItineraryItem, toDay: string) => { const moved = { ...it, start_at: toDay + it.start_at.slice(10), end_at: it.end_at ? toDay + it.end_at.slice(10) : it.end_at }; await update(moved) }

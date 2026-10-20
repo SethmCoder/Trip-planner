@@ -6,9 +6,10 @@ import MainPage from './pages/MainPage'
 import TripPage from './pages/TripPage'
 import SettingsPage from './pages/SettingsPage'
 import ResetPasswordPage from './pages/ResetPasswordPage'
+import ErrorBoundary from './components/ErrorBoundary'
 function Protected({ children }: { children: JSX.Element }) { const { profile, loading } = useAuth(); if (loading) return <p style={{ padding: 24 }}>Loading…</p>; return profile ? children : <Navigate to="/login" replace /> }
-export default function App() { return <AuthProvider><BrowserRouter><Routes>
+export default function App() { return <AuthProvider><ErrorBoundary><BrowserRouter><Routes>
   <Route path="/login" element={<LoginPage />} /><Route path="/create-account" element={<CreateAccountPage />} /><Route path="/reset-password" element={<ResetPasswordPage />} />
   <Route path="/" element={<Protected><MainPage /></Protected>} /><Route path="/trip/:id" element={<Protected><TripPage /></Protected>} /><Route path="/settings" element={<Protected><SettingsPage /></Protected>} />
   <Route path="*" element={<Navigate to="/" replace />} />
-</Routes></BrowserRouter></AuthProvider> }
+</Routes></BrowserRouter></ErrorBoundary></AuthProvider> }
