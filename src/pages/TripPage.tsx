@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import TopBar from '../components/TopBar'
 import MapView from '../components/MapView'
+import MajorStopsInput from '../components/MajorStopsInput'
 import { useAuth } from '../context/AuthContext'
 import * as api from '../lib/data'
 import { searchPlaces, type GeoResult } from '../lib/geocoding'
@@ -70,7 +71,7 @@ export default function TripPage() {
           <div className="panel" style={{ borderRadius: 0, flex: 'none', display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 12, alignItems: 'end' }}>
             <div><label style={{ marginTop: 0 }}>Trip Name</label><input style={{ fontSize: 18, fontWeight: 800 }} value={trip.name} onChange={e => saveT({ ...trip, name: e.target.value })} /></div>
             <div><label style={{ marginTop: 0 }}>Dates</label><div style={{ display: 'flex', gap: 6 }}><input type="date" value={trip.start_date} onChange={e => saveT({ ...trip, start_date: e.target.value })} /><input type="date" value={trip.end_date} onChange={e => saveT({ ...trip, end_date: e.target.value })} /></div></div>
-            <div><label style={{ marginTop: 0 }}>Major Stops</label><input value={trip.major_stops.map(s => s.name).join(', ')} onChange={e => saveT({ ...trip, major_stops: e.target.value.split(',').map(s => ({ name: s.trim() })).filter(s => s.name) })} placeholder="Stop 1, Stop 2" /></div>
+            <div><label style={{ marginTop: 0 }}>Major Stops</label><MajorStopsInput value={trip.major_stops} onChange={stops => saveT({ ...trip, major_stops: stops })} /></div>
           </div>
           <MapView pins={pins} showRoute />
         </div>

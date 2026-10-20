@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import TopBar from '../components/TopBar'
 import MapView from '../components/MapView'
+import MajorStopsInput from '../components/MajorStopsInput'
 import { useAuth } from '../context/AuthContext'
 import * as api from '../lib/data'
 import { searchPlaces } from '../lib/geocoding'
@@ -19,7 +20,7 @@ function TripCard({ trip, onChange, onOpen }: { trip: Trip; onChange: (t: Trip) 
       {results.length > 0 && <div style={{ border: '1px solid #999', borderRadius: 6, maxHeight: 120, overflowY: 'auto' }}>{results.map((r, i) => <button key={i} style={{ display: 'block', width: '100%', textAlign: 'left', background: '#fff', border: 'none', padding: '7px 9px', fontSize: 12 }} onClick={() => { upd({ place: r.name, place_lat: r.lat, place_lng: r.lng }); setPlaceQ(r.name); setResults([]) }}>{r.display}</button>)}</div>}
       <label>Start Date</label><input type="date" value={trip.start_date} onChange={e => upd({ start_date: e.target.value })} />
       <label>End Date</label><input type="date" value={trip.end_date} onChange={e => upd({ end_date: e.target.value })} />
-      <label>Major Stops (comma separated)</label><input value={trip.major_stops.map(s => s.name).join(', ')} onChange={e => upd({ major_stops: e.target.value.split(',').map(s => ({ name: s.trim() })).filter(s => s.name) })} placeholder="Stop 1, Stop 2" />
+      <label>Major Stops (comma separated)</label><MajorStopsInput value={trip.major_stops} onChange={stops => upd({ major_stops: stops })} />
       <label>Booking Status</label>
       <select value={trip.booking_status} onChange={e => upd({ booking_status: e.target.value as Trip['booking_status'] })}><option value="not_booked">Not Booked</option><option value="partially_booked">Partially Booked</option><option value="booked">Booked</option></select>
       <button className="btn-orange" style={{ width: '100%', marginTop: 12 }} onClick={onOpen}>Open Trip</button>
