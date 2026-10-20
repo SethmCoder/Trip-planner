@@ -26,7 +26,8 @@ export default function TopBar() {
           <span>▾</span>
         </button>
         {open && <div style={{ position: 'absolute', right: 0, top: 46, background: 'var(--white)', color: 'var(--black)', border: '1px solid var(--black)', borderRadius: 8, minWidth: 160, overflow: 'hidden', boxShadow: '0 4px 16px rgba(0,0,0,.25)' }}>
-          <button style={{ display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', background: '#fff', border: 'none' }} onClick={() => { setOpen(false); nav('/settings') }}>Settings</button>
+          <button style={{ display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', background: '#fff', border: 'none' }} onClick={() => { setOpen(false); nav('/') }}>Main Page</button>
+          <button style={{ display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', background: '#fff', border: 'none', borderTop: '1px solid #ddd' }} onClick={() => { setOpen(false); nav('/settings') }}>Settings</button>
           <button style={{ display: 'block', width: '100%', textAlign: 'left', padding: '11px 14px', background: '#fff', border: 'none', borderTop: '1px solid #ddd' }} onClick={async () => { await logout(); nav('/login') }}>Logout</button>
         </div>}
       </div>
