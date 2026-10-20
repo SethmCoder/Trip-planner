@@ -1,23 +1,16 @@
 import { supabase, isSupabaseConfigured } from './supabase'
 import { newId, type Trip, type ItineraryItem, type Profile } from './types'
 
-// ---------- Demo (localStorage) store ----------
-interface DemoUser extends Profile { password: string }
-interface DB { users: DemoUser[]; trips: Trip[]; items: ItineraryItem[]; sessionUserId: string | null }
-const KEY = 'travel-log-db-v1'
+// ---------- Local (localStorage) fallback store, used only when Supabase is not configured ----------
+interface LocalUser extends Profile { password: string }
+interface DB { users: LocalUser[]; trips: Trip[]; items: ItineraryItem[]; sessionUserId: string | null }
+const KEY = 'travel-log-db-v2'
 function seed(): DB {
-  const uid = newId(); const tid = newId(); const today = new Date(); const s = new Date(today); s.setDate(s.getDate() + 14); const e = new Date(s); e.setDate(e.getDate() + 4)
-  const iso = (d: Date) => d.toISOString().slice(0, 10)
-  return {
-    users: [{ id: uid, username: 'demo', email: 'demo@example.com', password: 'demo1234', avatar_url: null }],
-    sessionUserId: null,
-    trips: [{ id: tid, user_id: uid, name: 'Paris Adventure', place: 'Paris', place_lat: 48.8566, place_lng: 2.3522, start_date: iso(s), end_date: iso(e), major_stops: [{ name: 'Eiffel Tower', lat: 48.8584, lng: 2.2945 }, { name: 'Louvre Museum', lat: 48.8606, lng: 2.3376 }], booking_status: 'partially_booked', created_at: new Date().toISOString() }],
-    items: [{ id: newId(), trip_id: tid, user_id: uid, type: 'activity', group_id: null, title: 'Eiffel Tower', place_name: 'Eiffel Tower, Paris', lat: 48.8584, lng: 2.2945, from_name: '', from_lat: null, from_lng: null, to_name: '', to_lat: null, to_lng: null, start_at: `${iso(s)}T09:00`, end_at: `${iso(s)}T11:00`, duration_minutes: 120, mode_of_transport: '', booking_status: 'not_booked', image_url: 'https://upload.wikimedia.org/wikipedia/commons/thumb/a/a8/Tour_Eiffel_Wikimedia_Commons.jpg/320px-Tour_Eiffel_Wikimedia_Commons.jpg', sort_order: 0, created_at: new Date().toISOString() }],
-  }
+  return { users: [], sessionUserId: null, trips: [], items: [] }
 }
 function load(): DB { try { const r = localStorage.getItem(KEY); if (r) return JSON.parse(r) } catch {} const d = seed(); save(d); return d }
 function save(d: DB) { localStorage.setItem(KEY, JSON.stringify(d)) }
-const strip = (u: DemoUser): Profile => ({ id: u.id, username: u.username, email: u.email, avatar_url: u.avatar_url })
+const strip = (u: LocalUser): Profile => ({ id: u.id, username: u.username, email: u.email, avatar_url: u.avatar_url })
 
 // ---------- Auth ----------
 export async function getSessionProfile(): Promise<Profile | null> {
@@ -35,7 +28,7 @@ export async function login(identifier: string, password: string): Promise<Profi
     const { data: p } = await supabase.from('profiles').select('*').eq('id', data.user.id).single(); return p
   }
   const d = load(); const u = d.users.find(x => x.username.toLowerCase() === identifier.trim().toLowerCase() || x.email.toLowerCase() === identifier.trim().toLowerCase())
-  if (!u || u.password !== password) throw new Error('Invalid username/email or password. Demo: demo / demo1234')
+  if (!u || u.password !== password) throw new Error('Invalid username/email or password')
   d.sessionUserId = u.id; save(d); return strip(u)
 }
 export async function createAccount(email: string, username: string, password: string): Promise<Profile> {
@@ -49,7 +42,7 @@ export async function createAccount(email: string, username: string, password: s
   const d = load()
   if (d.users.some(x => x.username.toLowerCase() === username.toLowerCase())) throw new Error('Username already taken')
   if (d.users.some(x => x.email.toLowerCase() === email.toLowerCase())) throw new Error('Email already registered')
-  const u: DemoUser = { id: newId(), username, email, password, avatar_url: null }; d.users.push(u); d.sessionUserId = u.id; save(d); return strip(u)
+  const u: LocalUser = { id: newId(), username, email, password, avatar_url: null }; d.users.push(u); d.sessionUserId = u.id; save(d); return strip(u)
 }
 export async function logout(): Promise<void> {
   // All writes are persisted immediately, so logging out is inherently "saved"; flush local DB once more.
@@ -73,12 +66,15 @@ export async function updateProfile(profile: Profile, patch: Partial<Profile> & 
   if (patch.newPassword) u.password = patch.newPassword
   save(d); return strip(u)
 }
+const fileToDataUrl = (file: File) => new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result as string); r.onerror = rej; r.readAsDataURL(file) })
 export async function uploadAvatar(profile: Profile, file: File): Promise<string> {
   if (isSupabaseConfigured && supabase) {
-    const path = `${profile.id}/${Date.now()}-${file.name}`; const { error } = await supabase.storage.from('avatars').upload(path, file, { upsert: true }); if (error) throw new Error(error.message)
-    return supabase.storage.from('avatars').getPublicUrl(path).data.publicUrl
+    try {
+      const path = `${profile.id}/${Date.now()}-${file.name}`; const { error } = await supabase.storage.from('avatars').upload(path, file, { upsert: true }); if (error) throw error
+      return supabase.storage.from('avatars').getPublicUrl(path).data.publicUrl
+    } catch { return await fileToDataUrl(file) /* avatars bucket not created yet — store inline so the app still works */ }
   }
-  return await new Promise<string>((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result as string); r.onerror = rej; r.readAsDataURL(file) })
+  return await fileToDataUrl(file)
 }
 
 // ---------- Trips / Items ----------

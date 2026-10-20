@@ -1,6 +1,6 @@
 # Supabase Setup — The Travel Log
 
-The app works out of the box in local demo mode (browser localStorage, demo user `demo` / `demo1234`). To connect real Supabase:
+To connect real Supabase (users create their own account):
 
 1. Create a free project at https://supabase.com/dashboard
 2. In the project, open **SQL Editor**, paste all of `supabase/schema.sql`, and run it. This creates `profiles`, `trips`, `itinerary_items`, Row Level Security policies, the new-user trigger, and the public `avatars` storage bucket.
@@ -10,7 +10,7 @@ The app works out of the box in local demo mode (browser localStorage, demo user
    VITE_SUPABASE_URL=https://your-project.supabase.co
    VITE_SUPABASE_ANON_KEY=your-anon-key
    ```
-5. Restart `npm run dev`. The app automatically switches from demo mode to Supabase — no code changes needed.
+5. Restart `npm run dev`. The app automatically switches to Supabase when the keys are present — no code changes needed.
 
 Notes:
 - Auth uses Supabase Auth (email + password). Username login works by looking up the email for the username in `profiles`.
