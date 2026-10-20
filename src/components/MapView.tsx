@@ -1,7 +1,13 @@
 import { useEffect, useRef } from 'react'
 import L from 'leaflet'
 export interface MapPin { id: string; lat: number; lng: number; label: string; number?: number }
-export default function MapView({ pins, onPinClick, showRoute = false, children }: { pins: MapPin[]; onPinClick?: (id: string) => void; showRoute?: boolean; children?: React.ReactNode }) {
+export interface MapSegment { id: string; fromLat: number; fromLng: number; toLat: number; toLng: number; label: string }
+const arrowAt = (a: L.LatLng, b: L.LatLng) => {
+  const mid = L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2)
+  const angle = Math.atan2(b.lng - a.lng, b.lat - a.lat) * 180 / Math.PI // 0 = north; arrow glyph points east
+  return L.marker(mid, { icon: L.divIcon({ className: 'arrow-icon', html: `<div style="transform:rotate(${angle - 90}deg)">➤</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: false })
+}
+export default function MapView({ pins, segments = [], onPinClick, showRoute = false, children }: { pins: MapPin[]; segments?: MapSegment[]; onPinClick?: (id: string) => void; showRoute?: boolean; children?: React.ReactNode }) {
   const el = useRef<HTMLDivElement>(null); const mapRef = useRef<L.Map | null>(null); const layerRef = useRef<L.LayerGroup | null>(null)
   useEffect(() => {
     if (!el.current || mapRef.current) return
@@ -12,20 +18,26 @@ export default function MapView({ pins, onPinClick, showRoute = false, children 
   useEffect(() => {
     const map = mapRef.current, layer = layerRef.current; if (!map || !layer) return
     layer.clearLayers(); const pts: L.LatLngExpression[] = []
-    pins.forEach((p, i) => {
+    // Transit legs: a direct line between the departure and arrival stops, with endpoint dots and a direction arrow
+    segments.forEach(s => {
+      const a = L.latLng(s.fromLat, s.fromLng), b = L.latLng(s.toLat, s.toLng)
+      pts.push(a, b)
+      L.polyline([a, b], { color: '#f76d11', weight: 5, opacity: 0.95 }).bindPopup(s.label).addTo(layer)
+      L.circleMarker(a, { radius: 6, color: '#000000', weight: 2, fillColor: '#f76d11', fillOpacity: 1 }).bindPopup(s.label).addTo(layer)
+      L.circleMarker(b, { radius: 6, color: '#000000', weight: 2, fillColor: '#ffffff', fillOpacity: 1 }).bindPopup(s.label).addTo(layer)
+      arrowAt(a, b).addTo(layer)
+    })
+    pins.forEach(p => {
       pts.push([p.lat, p.lng])
       const icon = L.divIcon({ className: 'orange-pin', html: `<div class="pin-body"><span class="pin-num">${p.number ?? ''}</span></div>`, iconSize: [26, 26], iconAnchor: [13, 24] })
       const m = L.marker([p.lat, p.lng], { icon }).bindPopup(p.label); if (onPinClick) m.on('click', () => onPinClick(p.id)); m.addTo(layer)
     })
-    if (showRoute && pts.length > 1) {
-      L.polyline(pts, { color: '#f76d11', weight: 3 }).addTo(layer)
-      for (let i = 0; i < pts.length - 1; i++) {
-        const a = L.latLng(pts[i]), b = L.latLng(pts[i + 1]); const mid = L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2)
-        const angle = Math.atan2(b.lng - a.lng, b.lat - a.lat) * 180 / Math.PI // 0 = north
-        const arrow = L.marker(mid, { icon: L.divIcon({ className: 'arrow-icon', html: `<div style="transform:rotate(${angle - 90}deg)">➤</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: false }); arrow.addTo(layer)
-      }
+    if (showRoute && pins.length > 1) {
+      const routePts = pins.map(p => L.latLng(p.lat, p.lng))
+      L.polyline(routePts, { color: '#000000', weight: 2, dashArray: '6 6', opacity: 0.8 }).addTo(layer)
+      for (let i = 0; i < routePts.length - 1; i++) arrowAt(routePts[i], routePts[i + 1]).addTo(layer)
     }
-    if (pts.length === 1) map.setView(pts[0], 10); else if (pts.length > 1) map.fitBounds(L.latLngBounds(pts).pad(0.2))
-  }, [pins, showRoute])
+    if (pts.length === 1) map.setView(pts[0], 10); else if (pts.length > 1) map.fitBounds(L.latLngBounds(pts as L.LatLngExpression[]).pad(0.2))
+  }, [pins, segments, showRoute])
   return <div style={{ position: 'relative', flex: 1, minHeight: 300 }}><div ref={el} style={{ position: 'absolute', inset: 0 }} />{children}</div>
 }
