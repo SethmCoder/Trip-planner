@@ -44,6 +44,39 @@ export async function createAccount(email: string, username: string, password: s
   if (d.users.some(x => x.email.toLowerCase() === email.toLowerCase())) throw new Error('Email already registered')
   const u: LocalUser = { id: newId(), username, email, password, avatar_url: null }; d.users.push(u); d.sessionUserId = u.id; save(d); return strip(u)
 }
+export async function requestPasswordReset(identifier: string): Promise<void> {
+  const value = identifier.trim()
+  if (!value) throw new Error('Enter your username or email above, then click Forgot password')
+  if (isSupabaseConfigured && supabase) {
+    let email = value
+    if (!email.includes('@')) {
+      const { data } = await supabase.from('profiles').select('email').eq('username', email).maybeSingle()
+      // Don't reveal whether the account exists — send (or pretend to) either way
+      if (!data?.email) return
+      email = data.email
+    }
+    const { error } = await supabase.auth.resetPasswordForEmail(email, { redirectTo: `${window.location.origin}/reset-password` })
+    if (error) throw new Error(error.message)
+    return
+  }
+  throw new Error('Password reset by email is unavailable — no email service is connected')
+}
+export async function updatePasswordFromRecovery(newPassword: string): Promise<void> {
+  if (newPassword.length < 6) throw new Error('Password must be at least 6 characters')
+  if (isSupabaseConfigured && supabase) {
+    const { error } = await supabase.auth.updateUser({ password: newPassword })
+    if (error) throw new Error(error.message)
+    return
+  }
+  throw new Error('Password reset by email is unavailable — no email service is connected')
+}
+export async function hasRecoverySession(): Promise<boolean> {
+  if (isSupabaseConfigured && supabase) {
+    if (window.location.hash.includes('type=recovery') || window.location.search.includes('type=recovery')) return true
+    const { data } = await supabase.auth.getSession(); return Boolean(data.session)
+  }
+  return false
+}
 export async function logout(): Promise<void> {
   // All writes are persisted immediately, so logging out is inherently "saved"; flush local DB once more.
   if (isSupabaseConfigured && supabase) { await supabase.auth.signOut(); return }
