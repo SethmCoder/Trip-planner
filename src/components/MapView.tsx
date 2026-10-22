@@ -32,8 +32,10 @@ export default function MapView({ pins, segments = [], onPinClick, showRoute = f
         else groups[groups.length - 1].push(line[i])
       }
       groups.forEach(g => { if (g.length > 1) L.polyline(g, { color: '#f76d11', weight: 5, opacity: 0.95 }).bindPopup(s.label).addTo(layer) })
-      L.circleMarker(a, { radius: 6, color: '#000000', weight: 2, fillColor: '#f76d11', fillOpacity: 1 }).bindPopup(s.label).addTo(layer)
-      L.circleMarker(b, { radius: 6, color: '#000000', weight: 2, fillColor: '#ffffff', fillOpacity: 1 }).bindPopup(s.label).addTo(layer)
+      // Label the travel dots: 1 at the start of the leg, 2 at the finish
+      const dot = (pos: L.LatLng, num: number, kind: 'start' | 'finish') => L.marker(pos, { icon: L.divIcon({ className: 'endpoint-icon', html: `<div class="endpoint-label ${kind}">${num}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), zIndexOffset: 1000 }).bindPopup(s.label)
+      dot(a, 1, 'start').addTo(layer)
+      dot(b, 2, 'finish').addTo(layer)
       // Direction arrow at the route's midpoint (using a pair of points that don't straddle the map edge)
       let midIdx = Math.floor(line.length / 2)
       while (midIdx > 0 && Math.abs(line[midIdx].lng - line[midIdx - 1].lng) > 180) midIdx--

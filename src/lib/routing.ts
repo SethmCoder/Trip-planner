@@ -120,6 +120,29 @@ export function parseTransitTime(value: string, mode: string): number | null {
   const n = Number(v); return isNaN(n) ? null : Math.round(n)
 }
 
+/** Compact duration for in-between labels: "45m" under an hour, otherwise "2h" / "1.5h". */
+export function formatCompactDuration(minutes: number | null | undefined): string {
+  if (minutes == null || isNaN(minutes)) return ''
+  const m = Math.round(minutes)
+  if (m < 60) return `${m}m`
+  const h = m / 60
+  return `${Number.isInteger(h) ? h : h.toFixed(1)}h`
+}
+
+export interface GapTravel { minutes: number; type: string; icon: string }
+
+/** Estimated travel between two neighbouring stops that have no transit item between them. */
+export async function estimateGapTravel(from: LatLng, to: LatLng): Promise<GapTravel> {
+  const km = haversineKm(from, to)
+  if (km <= 2) return { minutes: Math.max(2, Math.round(km / 5 * 60)), type: 'Walking', icon: '🚶' }
+  if (km > 400) return { minutes: Math.max(20, Math.round(km / 750 * 60) + 30), type: 'Flight', icon: '✈️' }
+  const route = await getQuickestRoute(from, to, 'Car')
+  if (route && route.source.includes('OSRM')) return { minutes: route.minutes, type: 'Driving', icon: '🚗' }
+  // No road route (e.g. across water) — suggest flying for longer hops, driving estimate otherwise
+  if (km > 150) return { minutes: Math.max(20, Math.round(km / 750 * 60) + 30), type: 'Flight', icon: '✈️' }
+  return { minutes: Math.max(5, Math.round(km / 50 * 60)), type: 'Driving', icon: '🚗' }
+}
+
 export const addMinutes = (isoLocal: string, minutes: number): string => {
   const d = new Date(isoLocal); if (isNaN(+d)) return isoLocal
   d.setMinutes(d.getMinutes() + minutes)

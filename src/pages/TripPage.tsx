@@ -9,9 +9,9 @@ import * as api from '../lib/data'
 import { searchPlaces, type GeoResult } from '../lib/geocoding'
 import { bookingLink } from '../lib/bookingLinks'
 import { newId, fmtDate, type Trip, type ItineraryItem } from '../lib/types'
-import { calculateTransitMinutes, formatTransitTime, parseTransitTime, isFlight, addMinutes, getQuickestRoute, type LatLng } from '../lib/routing'
+import { calculateTransitMinutes, formatTransitTime, parseTransitTime, isFlight, addMinutes, getQuickestRoute, estimateGapTravel, formatCompactDuration, type LatLng, type GapTravel } from '../lib/routing'
 
-const baseItem = (trip: Trip, userId: string, order: number): ItineraryItem => ({ id: newId(), trip_id: trip.id, user_id: userId, type: 'activity', group_id: null, title: '', place_name: '', lat: trip.place_lat, lng: trip.place_lng, from_name: '', from_lat: null, from_lng: null, to_name: '', to_lat: null, to_lng: null, start_at: `${trip.start_date}T09:00`, end_at: `${trip.start_date}T10:00`, duration_minutes: 60, mode_of_transport: '', booking_status: 'not_booked', image_url: '', sort_order: order, created_at: new Date().toISOString() })
+const baseItem = (trip: Trip, userId: string, order: number): ItineraryItem => ({ id: newId(), trip_id: trip.id, user_id: userId, type: 'activity', group_id: null, title: '', place_name: '', lat: trip.place_lat, lng: trip.place_lng, from_name: '', from_lat: null, from_lng: null, to_name: '', to_lat: null, to_lng: null, start_at: `${trip.start_date}T09:00`, end_at: `${trip.start_date}T10:00`, duration_minutes: 60, mode_of_transport: '', booking_status: 'not_booked', booking_open_date: '', book_by_date: '', image_url: '', sort_order: order, created_at: new Date().toISOString() })
 function PlaceSearch({ label, onPick }: { label: string; onPick: (r: GeoResult) => void }) {
   const [q, setQ] = useState(''); const [res, setRes] = useState<GeoResult[]>([]); const [picked, setPicked] = useState('')
   return <div><label>{label}</label><input value={picked || q} onChange={async e => { setPicked(''); setQ(e.target.value); if (e.target.value.length > 2) setRes(await searchPlaces(e.target.value)); else setRes([]) }} placeholder="Search a place…" />
@@ -26,7 +26,8 @@ export default function TripPage() {
   const [tStart, setTStart] = useState(''); const [tEnd, setTEnd] = useState('')
   const [hotel, setHotel] = useState<GeoResult | null>(null); const [hIn, setHIn] = useState(''); const [hOut, setHOut] = useState('')
   const [act, setAct] = useState<GeoResult | null>(null); const [aTime, setATime] = useState('')
-  useEffect(() => { if (id) { api.getTrip(id).then(t => { setTrip(t); if (t) { setTStart(`${t.start_date}T09:00`); setTEnd(`${t.start_date}T11:00`); setHIn(`${t.start_date}T15:00`); setHOut(`${t.end_date}T11:00`); setATime(`${t.start_date}T10:00`) } }); api.listItems(id).then(setItems) } }, [id])
+  const [rest, setRest] = useState<GeoResult | null>(null); const [rTime, setRTime] = useState('')
+  useEffect(() => { if (id) { api.getTrip(id).then(t => { setTrip(t); if (t) { setTStart(`${t.start_date}T09:00`); setTEnd(`${t.start_date}T11:00`); setHIn(`${t.start_date}T15:00`); setHOut(`${t.end_date}T11:00`); setATime(`${t.start_date}T10:00`); setRTime(`${t.start_date}T19:00`) } }); api.listItems(id).then(setItems) } }, [id])
   // NOTE: all hooks must run before any early return, or React crashes ("rendered more hooks") to a blank screen when the trip loads
   const days = useMemo(() => { const out: string[] = []; if (!trip) return out; if (trip.start_date && trip.end_date) { const d = new Date(trip.start_date + 'T12:00:00'); const end = new Date(trip.end_date + 'T12:00:00'); while (d <= end && out.length < 60) { out.push(d.toISOString().slice(0, 10)); d.setDate(d.getDate() + 1) } } return out.length ? out : [trip.start_date] }, [trip])
   // Quickest-route geometry for each transit leg, fetched from OSRM and drawn on the map
@@ -42,6 +43,22 @@ export default function TripPage() {
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [transitSignature])
+  // Estimated travel (time + type) between neighbouring stops that have no transit item between them
+  const [gapInfo, setGapInfo] = useState<Record<string, GapTravel>>({})
+  const sortedForGaps = [...items].sort((a, b) => a.sort_order - b.sort_order)
+  const gapPairs: [ItineraryItem, ItineraryItem][] = []
+  for (let i = 0; i < sortedForGaps.length - 1; i++) { const a = sortedForGaps[i], b = sortedForGaps[i + 1]; if (a.type !== 'transit' && b.type !== 'transit' && a.lat != null && a.lng != null && b.lat != null && b.lng != null) gapPairs.push([a, b]) }
+  const gapSignature = gapPairs.map(([a, b]) => `${a.id}:${a.lat},${a.lng}->${b.id}:${b.lat},${b.lng}`).join('|')
+  useEffect(() => {
+    let cancelled = false
+    gapPairs.forEach(async ([a, b]) => {
+      const key = `${a.id}->${b.id}`
+      const est = await estimateGapTravel({ lat: a.lat!, lng: a.lng! }, { lat: b.lat!, lng: b.lng! })
+      if (!cancelled) setGapInfo(prev => ({ ...prev, [key]: est }))
+    })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gapSignature])
   if (!profile) return null; if (!trip) return <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}><TopBar /><p style={{ padding: 20 }}>Loading trip… <button className="btn-outline btn-small" onClick={() => nav('/')}>Back</button></p></div>
   const saveT = async (t: Trip) => { setTrip(t); await api.saveTrip(t) }
   const deleteThisTrip = async () => {
@@ -74,9 +91,10 @@ export default function TripPage() {
   }
   const addHotel = () => { if (!hotel) return alert('Pick a hotel / place'); const gid = newId(); const common = { ...baseItem(trip, profile.id, items.length), type: 'hotel' as const, group_id: gid, title: hotel.name, place_name: hotel.display, lat: hotel.lat, lng: hotel.lng }; addItems([{ ...common, id: newId(), subtype: 'checkin', title: `${hotel.name} (Check-in)`, start_at: hIn, end_at: hIn, sort_order: items.length }, { ...common, id: newId(), subtype: 'checkout', title: `${hotel.name} (Check-out)`, start_at: hOut, end_at: hOut, sort_order: items.length + 1 }]) }
   const addActivity = () => { if (!act) return alert('Pick a place to visit'); addItems([{ ...baseItem(trip, profile.id, items.length), type: 'activity', title: act.name, place_name: act.display, lat: act.lat, lng: act.lng, start_at: aTime, end_at: aTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(act.name)}/400/220` }]) }
+  const addRestaurant = () => { if (!rest) return alert('Pick a restaurant'); addItems([{ ...baseItem(trip, profile.id, items.length), type: 'restaurant', title: rest.name, place_name: rest.display, lat: rest.lat, lng: rest.lng, start_at: rTime, end_at: rTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(rest.name + '-food')}/400/220` }]) }
   const ordered = [...items].sort((a, b) => a.sort_order - b.sort_order)
   const pins = ordered.filter(i => i.lat != null).map((i, ix) => ({ id: i.id, lat: i.lat!, lng: i.lng!, label: `<b>${i.title}</b><br/>${i.place_name}`, number: ix + 1 }))
-  const segments = ordered.filter(i => i.type === 'transit' && i.from_lat != null && i.from_lng != null && i.to_lat != null && i.to_lng != null).map(i => ({ id: i.id, fromLat: i.from_lat!, fromLng: i.from_lng!, toLat: i.to_lat!, toLng: i.to_lng!, path: routePaths[i.id], label: `<b>${i.title}</b><br/>${i.from_name} → ${i.to_name}${i.mode_of_transport ? `<br/>${i.mode_of_transport}` : ''}<br/>Quickest route` }))
+  const segments = ordered.filter(i => i.type === 'transit' && i.from_lat != null && i.from_lng != null && i.to_lat != null && i.to_lng != null).map(i => ({ id: i.id, fromLat: i.from_lat!, fromLng: i.from_lng!, toLat: i.to_lat!, toLng: i.to_lng!, path: routePaths[i.id], label: `<b>${i.title}</b><br/>1 (Start): ${i.from_name}<br/>2 (Finish): ${i.to_name}${i.mode_of_transport ? `<br/>${i.mode_of_transport}` : ''}<br/>Quickest route` }))
   const dayLoad = (day: string) => { const di = ordered.filter(i => i.start_at.slice(0, 10) === day); return { count: di.length, mins: di.reduce((s, i) => s + (i.duration_minutes || 60), 0), items: di } }
   const leastFullDay = days.reduce((best, d) => dayLoad(d).count < dayLoad(best).count ? d : best, days[0])
   const moveItem = async (it: ItineraryItem, toDay: string) => { const moved = { ...it, start_at: toDay + it.start_at.slice(10), end_at: it.end_at ? toDay + it.end_at.slice(10) : it.end_at }; await update(moved) }
@@ -99,9 +117,10 @@ export default function TripPage() {
     return <div key={it.id} draggable onDragStart={() => setDragId(it.id)} onDragOver={e => e.preventDefault()} onDrop={() => onDrop(it.id)} style={{ border: '1px solid var(--black)', borderLeft: '6px solid var(--orange)', borderRadius: 8, padding: 10, marginBottom: 10, background: '#fff', cursor: 'grab' }}>
       <div onClick={toggle} title={isOpen ? 'Click to collapse' : 'Click to expand'} style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 6, cursor: 'pointer' }}>
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: '#555' }}>⠿ {it.type === 'transit' ? '✈ TRANSIT' : it.type === 'hotel' ? '🏨 HOTEL / STAY' : '📍 THINGS TO DO'}</div>
+          <div style={{ fontSize: 11, fontWeight: 700, color: '#555' }}>⠿ {it.type === 'transit' ? '✈ TRANSIT' : it.type === 'hotel' ? '🏨 HOTEL / STAY' : it.type === 'restaurant' ? '🍽️ RESTAURANT' : '📍 THINGS TO DO'}</div>
           <div style={{ fontWeight: 800, fontSize: 15, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{it.title || 'Untitled'}</div>
           <div style={{ fontSize: 12, color: '#333', marginTop: 2 }}>{summaryOf(it)}</div>
+          {(it.booking_open_date || it.book_by_date) && <div style={{ fontSize: 12, marginTop: 2, fontWeight: it.book_by_date && it.booking_status !== 'booked' && it.book_by_date <= new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) ? 800 : 400, color: it.book_by_date && it.booking_status !== 'booked' && it.book_by_date < new Date().toISOString().slice(0, 10) ? '#c00' : it.book_by_date && it.booking_status !== 'booked' && it.book_by_date <= new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) ? 'var(--orange)' : '#555' }}>📅 {it.booking_open_date ? `Booking opens ${fmtDate(it.booking_open_date)}` : ''}{it.booking_open_date && it.book_by_date ? ' · ' : ''}{it.book_by_date ? `Book by ${fmtDate(it.book_by_date)}` : ''}</div>}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, flex: 'none' }}>
           {bookingBadge(it.booking_status)}
@@ -109,19 +128,39 @@ export default function TripPage() {
           <button type="button" aria-label="Delete item" title="Delete item" onClick={e => { e.stopPropagation(); if (window.confirm(`Delete "${it.title || 'this item'}"?`)) remove(it) }} style={{ border: 'none', background: 'none', fontWeight: 800, color: '#c00' }}>✕</button>
         </div>
       </div>
-      {!isOpen && it.type === 'activity' && it.image_url && <img src={it.image_url} alt={it.title} style={{ width: '100%', height: 70, objectFit: 'cover', borderRadius: 6, marginTop: 8 }} />}
+      {!isOpen && (it.type === 'activity' || it.type === 'restaurant') && it.image_url && <img src={it.image_url} alt={it.title} style={{ width: '100%', height: 70, objectFit: 'cover', borderRadius: 6, marginTop: 8 }} />}
       {isOpen && <>
       <label>Name / Title</label><input value={it.title} onChange={e => update({ ...it, title: e.target.value })} />
       {it.type === 'transit' && <><label>From</label><input value={it.from_name} onChange={e => update({ ...it, from_name: e.target.value })} /><label>To</label><input value={it.to_name} onChange={e => update({ ...it, to_name: e.target.value })} /><label>Mode of Transportation</label><input value={it.mode_of_transport} onChange={e => update({ ...it, mode_of_transport: e.target.value })} placeholder="Airplane, Train, Bus, Public Transit…" /><label>Departure</label><input type="datetime-local" value={it.start_at} onChange={e => update({ ...it, start_at: e.target.value })} /><label>Arrival</label><input type="datetime-local" value={it.end_at} onChange={e => { const end = e.target.value; update({ ...it, end_at: end, duration_minutes: it.start_at && end ? Math.max(0, Math.round((+new Date(end) - +new Date(it.start_at)) / 60000)) : it.duration_minutes }) }} /><TransitTimeInput minutes={it.duration_minutes} mode={it.mode_of_transport} onChange={mins => update({ ...it, duration_minutes: mins })} /><button type="button" className="btn-outline btn-small" style={{ marginTop: 8 }} onClick={() => recalcTransit(it)}>Calculate Transit Time</button></>}
       {it.type === 'hotel' && <><label>Hotel Name</label><input value={it.title.replace(/ \((Check-in|Check-out)\)$/, '')} onChange={e => update({ ...it, title: `${e.target.value} (${it.subtype === 'checkout' ? 'Check-out' : 'Check-in'})` })} /><label>Place</label><input value={it.place_name} onChange={e => update({ ...it, place_name: e.target.value })} /><p style={{ fontSize: 12, margin: '6px 0' }}>{it.subtype === 'checkout' ? 'End of stay (Check-out)' : 'Beginning of stay (Check-in)'}: <b>{fmtDate(it.start_at)}</b></p><label>{it.subtype === 'checkout' ? 'Check-out' : 'Check-in'} Date &amp; Time</label><input type="datetime-local" value={it.start_at} onChange={e => update({ ...it, start_at: e.target.value, end_at: e.target.value })} /></>}
-      {it.type === 'activity' && <>{it.image_url && <img src={it.image_url} alt={it.title} style={{ width: '100%', height: 120, objectFit: 'cover', borderRadius: 6, marginTop: 8 }} />}<label>Place</label><input value={it.place_name} onChange={e => update({ ...it, place_name: e.target.value })} /><label>Picture URL</label><input value={it.image_url} onChange={e => update({ ...it, image_url: e.target.value })} /><label>Date &amp; Time</label><input type="datetime-local" value={it.start_at} onChange={e => update({ ...it, start_at: e.target.value })} /></>}
+      {(it.type === 'activity' || it.type === 'restaurant') && <>{it.image_url && <img src={it.image_url} alt={it.title} style={{ width: '100%', height: 120, objectFit: 'cover', borderRadius: 6, marginTop: 8 }} />}<label>{it.type === 'restaurant' ? 'Restaurant / Place' : 'Place'}</label><input value={it.place_name} onChange={e => update({ ...it, place_name: e.target.value })} /><label>Picture URL</label><input value={it.image_url} onChange={e => update({ ...it, image_url: e.target.value })} /><label>Date &amp; Time</label><input type="datetime-local" value={it.start_at} onChange={e => update({ ...it, start_at: e.target.value })} /></>}
       {(it.type !== 'transit') && it.type !== 'hotel' ? null : null}
       <label>Booking Status</label><select value={it.booking_status} onChange={e => update({ ...it, booking_status: e.target.value as ItineraryItem['booking_status'] })}><option value="not_booked">Not Booked</option><option value="partially_booked">Partially Booked</option><option value="booked">Booked</option></select>
+      <label>Booking Open Date</label><input type="date" value={it.booking_open_date ?? ''} onChange={e => update({ ...it, booking_open_date: e.target.value })} />
+      <label>Book By Date</label><input type="date" value={it.book_by_date ?? ''} onChange={e => update({ ...it, book_by_date: e.target.value })} />
+      {it.booking_open_date && it.book_by_date && it.book_by_date < it.booking_open_date && <p style={{ fontSize: 12, color: '#c00', margin: '6px 0 0' }}>Book by date is before the booking open date.</p>}
       {link && <a href={link.url} target="_blank" rel="noreferrer" style={{ display: 'inline-block', marginTop: 8, color: 'var(--orange)', fontWeight: 700, fontSize: 13 }}>{link.label} ↗</a>}
       <button type="button" className="btn-outline btn-small" onClick={() => { if (window.confirm(`Delete "${it.title || 'this item'}"?`)) remove(it) }} style={{ display: 'block', marginTop: 12, color: '#c00', borderColor: '#c00' }}>Delete Item</button>
       </>}
     </div>
   }
+  // Gray travel indicator shown between two stops when no transit item connects them
+  const gapAfter = (it: ItineraryItem) => {
+    const ix = ordered.findIndex(x => x.id === it.id); const next = ix >= 0 ? ordered[ix + 1] : undefined
+    if (!next || it.type === 'transit' || next.type === 'transit') return null
+    const info = gapInfo[`${it.id}->${next.id}`]
+    const hasCoords = it.lat != null && it.lng != null && next.lat != null && next.lng != null
+    return (
+      <div key={`gap-${it.id}-${next.id}`} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', margin: '-4px 0 6px', color: '#808080' }}>
+        <div style={{ width: 2, height: 10, background: '#c9c9c9' }} />
+        <div style={{ fontSize: 12, fontWeight: 700, background: '#f2f2f2', border: '1px solid #d9d9d9', borderRadius: 999, padding: '3px 10px' }}>
+          {hasCoords ? (info ? `${info.icon} ${info.type} · ${formatCompactDuration(info.minutes)}` : 'Calculating travel…') : 'Travel time unknown'}
+        </div>
+        <div style={{ width: 2, height: 10, background: '#c9c9c9' }} />
+      </div>
+    )
+  }
+  const renderCards = (list: ItineraryItem[]) => list.flatMap(it => [card(it), gapAfter(it)])
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}><TopBar />
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
@@ -132,6 +171,7 @@ export default function TripPage() {
           <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6 }}><h4>Transit</h4><PlaceSearch label="From" onPick={setFrom} /><PlaceSearch label="To" onPick={setTo} /><label>Mode</label><input value={mode} onChange={e => setMode(e.target.value)} /><label>Departure</label><input type="datetime-local" value={tStart} onChange={e => setTStart(e.target.value)} /><label>Arrival</label><input type="datetime-local" value={tEnd} onChange={e => setTEnd(e.target.value)} /><button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addTransit}>Add Transit</button></div>
           <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}><h4>Hotel / Stay</h4><PlaceSearch label="Hotel / Place" onPick={setHotel} /><label>Beginning of Stay</label><input type="datetime-local" value={hIn} onChange={e => setHIn(e.target.value)} /><label>End of Stay</label><input type="datetime-local" value={hOut} onChange={e => setHOut(e.target.value)} /><button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addHotel}>Add Hotel / Stay</button><p style={{ fontSize: 11 }}>Adds a check-in and a check-out card.</p></div>
           <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}><h4>Things to Do</h4><PlaceSearch label="Place" onPick={setAct} /><label>Date &amp; Time</label><input type="datetime-local" value={aTime} onChange={e => setATime(e.target.value)} /><button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addActivity}>Add Thing to Do</button></div>
+          <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}><h4>Restaurant</h4><PlaceSearch label="Restaurant / Place" onPick={setRest} /><label>Date &amp; Time</label><input type="datetime-local" value={rTime} onChange={e => setRTime(e.target.value)} /><button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addRestaurant}>Add Restaurant</button></div>
         </aside>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minWidth: 0 }}>
           <div className="panel" style={{ borderRadius: 0, flex: 'none', display: 'grid', gridTemplateColumns: '1fr auto auto', gap: 12, alignItems: 'end' }}>
@@ -144,13 +184,13 @@ export default function TripPage() {
         <aside className="panel" style={{ flex: '0 0 330px', borderRadius: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}><h3 style={{ margin: 0, fontFamily: "'Courier New',monospace" }}>Your Places</h3><label style={{ display: 'flex', alignItems: 'center', gap: 6, margin: 0, fontSize: 12 }}>Divide into days <span className="toggle"><input type="checkbox" checked={divide} onChange={e => setDivide(e.target.checked)} /><span className="slider" /></span></label></div>
           <p style={{ fontSize: 12 }}>Drag cards to reorder. Click a search result on the left to add it here.</p>
-          {!divide && ordered.map(card)}
+          {!divide && renderCards(ordered)}
           {divide && days.map(day => { const load = dayLoad(day); const over = load.count > 5 || load.mins > 480; return <div key={day}>
             <div style={{ borderTop: '3px solid var(--black)', margin: '14px 0 8px', paddingTop: 6, fontWeight: 800 }}>{fmtDate(day)} <span style={{ fontWeight: 400, fontSize: 12 }}>({load.count} items)</span></div>
             {over && <div style={{ background: '#fff3e8', border: '1px solid var(--orange)', borderRadius: 6, padding: 8, fontSize: 12, marginBottom: 8 }}>This day looks full. Suggestion: move an item to <b>{fmtDate(leastFullDay)}</b>. {load.items.length > 0 && <button className="btn-orange btn-small" onClick={() => moveItem(load.items[load.items.length - 1], leastFullDay)}>Move last item there</button>}</div>}
-            {load.items.map(card)}{load.items.length === 0 && <p style={{ fontSize: 12, color: '#666' }}>No items this day.</p>}
+            {renderCards(load.items)}{load.items.length === 0 && <p style={{ fontSize: 12, color: '#666' }}>No items this day.</p>}
           </div> })}
-          {divide && ordered.filter(i => !days.includes(i.start_at.slice(0, 10))).length > 0 && <><div style={{ borderTop: '3px solid var(--black)', margin: '14px 0 8px', paddingTop: 6, fontWeight: 800 }}>Outside trip dates</div>{ordered.filter(i => !days.includes(i.start_at.slice(0, 10))).map(card)}</>}
+          {divide && ordered.filter(i => !days.includes(i.start_at.slice(0, 10))).length > 0 && <><div style={{ borderTop: '3px solid var(--black)', margin: '14px 0 8px', paddingTop: 6, fontWeight: 800 }}>Outside trip dates</div>{renderCards(ordered.filter(i => !days.includes(i.start_at.slice(0, 10))))}</>}
         </aside>
       </div>
     </div>

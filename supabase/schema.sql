@@ -28,8 +28,14 @@ create table if not exists public.itinerary_items (
   to_name text not null default '', to_lat double precision, to_lng double precision,
   start_at timestamptz, end_at timestamptz, duration_minutes int,
   mode_of_transport text not null default '', booking_status booking_status not null default 'not_booked',
+  booking_open_date date, book_by_date date,
   image_url text not null default '', sort_order int not null default 0,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+-- For existing projects: add the booking-window columns if they are not there yet
+alter table public.itinerary_items add column if not exists booking_open_date date;
+alter table public.itinerary_items add column if not exists book_by_date date;
+-- For existing projects: allow 'restaurant' as an itinerary item type
+alter type item_type add value if not exists 'restaurant';
 create index if not exists idx_trips_user on public.trips(user_id);
 create index if not exists idx_items_trip on public.itinerary_items(trip_id, sort_order);
 

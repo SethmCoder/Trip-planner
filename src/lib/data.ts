@@ -127,12 +127,29 @@ export async function deleteTrip(id: string) {
   if (isSupabaseConfigured && supabase) { await supabase.from('trips').delete().eq('id', id); return }
   const d = load(); d.trips = d.trips.filter(t => t.id !== id); d.items = d.items.filter(i => i.trip_id !== id); save(d)
 }
+const normalizeItem = (i: ItineraryItem): ItineraryItem => ({ ...i, booking_open_date: i.booking_open_date ?? '', book_by_date: i.book_by_date ?? '' })
 export async function listItems(tripId: string): Promise<ItineraryItem[]> {
-  if (isSupabaseConfigured && supabase) { const { data } = await supabase.from('itinerary_items').select('*').eq('trip_id', tripId).order('sort_order'); return data ?? [] }
-  return load().items.filter(i => i.trip_id === tripId).sort((a, b) => a.sort_order - b.sort_order)
+  if (isSupabaseConfigured && supabase) { const { data } = await supabase.from('itinerary_items').select('*').eq('trip_id', tripId).order('sort_order'); return (data ?? []).map(normalizeItem) }
+  return load().items.filter(i => i.trip_id === tripId).sort((a, b) => a.sort_order - b.sort_order).map(normalizeItem)
 }
 export async function saveItem(item: ItineraryItem): Promise<ItineraryItem> {
-  if (isSupabaseConfigured && supabase) { const { data, error } = await supabase.from('itinerary_items').upsert(item).select().single(); if (error) throw new Error(error.message); return data }
+  if (isSupabaseConfigured && supabase) {
+    // Empty strings are not valid Postgres dates — send null instead
+    const payload = { ...item, booking_open_date: item.booking_open_date || null, book_by_date: item.book_by_date || null }
+    const { data, error } = await supabase.from('itinerary_items').upsert(payload).select().single()
+    if (error) {
+      // Database has not been migrated yet (booking date columns missing) — save without them rather than failing
+      if (/booking_open_date|book_by_date/.test(error.message)) {
+        const { booking_open_date, book_by_date, ...rest } = payload
+        const retry = await supabase.from('itinerary_items').upsert(rest).select().single()
+        if (retry.error) throw new Error(retry.error.message)
+        console.warn('Saved without booking dates: run the latest supabase/schema.sql to enable them')
+        return normalizeItem(retry.data)
+      }
+      throw new Error(error.message)
+    }
+    return normalizeItem(data)
+  }
   const d = load(); const i = d.items.findIndex(x => x.id === item.id); if (i >= 0) d.items[i] = item; else d.items.push(item); save(d); return item
 }
 export async function saveItems(items: ItineraryItem[]) { for (const i of items) await saveItem(i) }
