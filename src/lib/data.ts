@@ -1,14 +1,24 @@
 import { supabase, isSupabaseConfigured } from './supabase'
-import { newId, type Trip, type ItineraryItem, type Profile } from './types'
+import { newId, type Trip, type ItineraryItem, type Profile, type SavedPlace } from './types'
 
 // ---------- Local (localStorage) fallback store, used only when Supabase is not configured ----------
 interface LocalUser extends Profile { password: string }
-interface DB { users: LocalUser[]; trips: Trip[]; items: ItineraryItem[]; sessionUserId: string | null }
+interface DB { users: LocalUser[]; trips: Trip[]; items: ItineraryItem[]; savedPlaces: SavedPlace[]; sessionUserId: string | null }
 const KEY = 'travel-log-db-v2'
 function seed(): DB {
-  return { users: [], sessionUserId: null, trips: [], items: [] }
+  return { users: [], sessionUserId: null, trips: [], items: [], savedPlaces: [] }
 }
-function load(): DB { try { const r = localStorage.getItem(KEY); if (r) return JSON.parse(r) } catch {} const d = seed(); save(d); return d }
+function load(): DB {
+  try {
+    const r = localStorage.getItem(KEY)
+    if (r) {
+      const parsed = JSON.parse(r)
+      if (!parsed.savedPlaces) parsed.savedPlaces = []
+      return parsed
+    }
+  } catch {}
+  const d = seed(); save(d); return d
+}
 function save(d: DB) { localStorage.setItem(KEY, JSON.stringify(d)) }
 const strip = (u: LocalUser): Profile => ({ id: u.id, username: u.username, email: u.email, avatar_url: u.avatar_url })
 
@@ -170,4 +180,41 @@ export async function saveItems(items: ItineraryItem[]) { for (const i of items)
 export async function deleteItem(id: string) {
   if (isSupabaseConfigured && supabase) { await supabase.from('itinerary_items').delete().eq('id', id); return }
   const d = load(); d.items = d.items.filter(i => i.id !== id); save(d)
+}
+
+// ---------- Saved places ----------
+export async function listSavedPlaces(userId: string): Promise<SavedPlace[]> {
+  if (isSupabaseConfigured && supabase) {
+    const { data, error } = await supabase.from('saved_places').select('*').eq('user_id', userId).order('created_at', { ascending: false })
+    if (error) {
+      if (/relation|does not exist|saved_places/i.test(error.message)) return load().savedPlaces.filter(p => p.user_id === userId)
+      throw new Error(error.message)
+    }
+    return data ?? []
+  }
+  return load().savedPlaces.filter(p => p.user_id === userId).sort((a, b) => b.created_at.localeCompare(a.created_at))
+}
+export async function saveSavedPlace(place: SavedPlace): Promise<SavedPlace> {
+  if (isSupabaseConfigured && supabase) {
+    const { data, error } = await supabase.from('saved_places').upsert(place).select().single()
+    if (error) {
+      // Fall back to local storage if table not migrated yet
+      if (/relation|does not exist|saved_places/i.test(error.message)) {
+        const d = load(); const i = d.savedPlaces.findIndex(x => x.id === place.id)
+        if (i >= 0) d.savedPlaces[i] = place; else d.savedPlaces.unshift(place); save(d)
+        return place
+      }
+      throw new Error(error.message)
+    }
+    return data
+  }
+  const d = load(); const i = d.savedPlaces.findIndex(x => x.id === place.id)
+  if (i >= 0) d.savedPlaces[i] = place; else d.savedPlaces.unshift(place); save(d); return place
+}
+export async function deleteSavedPlace(id: string) {
+  if (isSupabaseConfigured && supabase) {
+    const { error } = await supabase.from('saved_places').delete().eq('id', id)
+    if (error && !/relation|does not exist|saved_places/i.test(error.message)) throw new Error(error.message)
+  }
+  const d = load(); d.savedPlaces = d.savedPlaces.filter(p => p.id !== id); save(d)
 }

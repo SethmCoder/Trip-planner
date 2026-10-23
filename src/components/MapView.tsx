@@ -1,11 +1,43 @@
 import { useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
-import { fetchNearbyPois, poiMeta, type MapPoi } from '../lib/pois'
+import { emojiForKind, fetchNearbyPois, type MapPoi } from '../lib/pois'
 
-export interface MapPin { id: string; lat: number; lng: number; label: string; number?: number; kind?: string }
+export interface SavePlacePayload {
+  name: string
+  place_name?: string
+  lat: number
+  lng: number
+  category?: string
+}
+
+export interface MapPin {
+  id: string
+  lat: number
+  lng: number
+  label: string
+  number?: number
+  kind?: string
+  name?: string
+  savable?: boolean
+}
 export interface MapSegment { id: string; fromLat: number; fromLng: number; toLat: number; toLng: number; label: string; path?: { lat: number; lng: number }[] }
 
-const WORLD_BOUNDS = L.latLngBounds(L.latLng(-85, -180), L.latLng(85, 180))
+/** Keep consecutive longitudes continuous (e.g. Japan → Pacific → Seattle). */
+function unwrapLng(lng: number, refLng: number) {
+  let out = lng
+  while (out - refLng > 180) out -= 360
+  while (out - refLng < -180) out += 360
+  return out
+}
+
+function unwrapPath(points: L.LatLng[]): L.LatLng[] {
+  if (points.length === 0) return []
+  const out: L.LatLng[] = [points[0]]
+  for (let i = 1; i < points.length; i++) {
+    out.push(L.latLng(points[i].lat, unwrapLng(points[i].lng, out[i - 1].lng)))
+  }
+  return out
+}
 
 const arrowAt = (a: L.LatLng, b: L.LatLng) => {
   const mid = L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2)
@@ -13,24 +45,14 @@ const arrowAt = (a: L.LatLng, b: L.LatLng) => {
   return L.marker(mid, { icon: L.divIcon({ className: 'arrow-icon', html: `<div style="transform:rotate(${angle - 90}deg)">➤</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), interactive: false })
 }
 
-function itineraryIcon(number: number | undefined, selected: boolean, kind?: string) {
-  const size = selected ? 32 : 26
-  const kindClass = kind ? ` pin-${kind}` : ''
+function emojiPinIcon(kind: string | undefined, number: number | undefined, selected: boolean) {
+  const emoji = emojiForKind(kind)
+  const num = number != null ? `<span class="emoji-pin-num">${number}</span>` : ''
   return L.divIcon({
-    className: 'orange-pin',
-    html: `<div class="pin-body${selected ? ' selected' : ''}${kindClass}"><span class="pin-num">${number ?? ''}</span></div>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size - 2],
-  })
-}
-
-function poiIcon(poi: MapPoi) {
-  const meta = poiMeta(poi.category)
-  return L.divIcon({
-    className: 'poi-pin',
-    html: `<div class="poi-marker" style="background:${meta.color}" title="${meta.title}"><span>${meta.icon}</span></div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
+    className: 'emoji-pin',
+    html: `<div class="emoji-pin-body${selected ? ' selected' : ''}"><span class="emoji-pin-glyph">${emoji}</span>${num}</div>`,
+    iconSize: [36, 36],
+    iconAnchor: [18, 34],
   })
 }
 
@@ -53,6 +75,7 @@ export default function MapView({
   showUserLocation = false,
   placeContext = '',
   onPoisLoaded,
+  onSavePlace,
   children,
 }: {
   pins: MapPin[]
@@ -64,6 +87,7 @@ export default function MapView({
   showUserLocation?: boolean
   placeContext?: string
   onPoisLoaded?: (pois: MapPoi[]) => void
+  onSavePlace?: (place: SavePlacePayload) => void
   children?: React.ReactNode
 }) {
   const el = useRef<HTMLDivElement>(null)
@@ -76,9 +100,11 @@ export default function MapView({
   const accuracyRef = useRef<L.Circle | null>(null)
   const watchIdRef = useRef<number | null>(null)
   const markersRef = useRef<Record<string, L.Marker>>({})
-  const pinMetaRef = useRef<Record<string, { number?: number; kind?: string }>>({})
+  const pinMetaRef = useRef<Record<string, { number?: number; kind?: string; name?: string; savable?: boolean; lat: number; lng: number }>>({})
+  const poiCacheRef = useRef<Record<string, MapPoi>>({})
   const onPinClickRef = useRef(onPinClick)
   const onPoisLoadedRef = useRef(onPoisLoaded)
+  const onSavePlaceRef = useRef(onSavePlace)
   const selectedIdRef = useRef(selectedId)
   const placeContextRef = useRef(placeContext)
   const fittedKeyRef = useRef('')
@@ -87,11 +113,12 @@ export default function MapView({
   const [poiCount, setPoiCount] = useState(0)
   const [locStatus, setLocStatus] = useState<'off' | 'pending' | 'on' | 'denied'>('off')
 
-  const pinsKey = pins.map(p => `${p.id}:${p.lat}:${p.lng}:${p.number ?? ''}:${p.kind ?? ''}`).join('|')
+  const pinsKey = pins.map(p => `${p.id}:${p.lat}:${p.lng}:${p.number ?? ''}:${p.kind ?? ''}:${p.savable ? 1 : 0}`).join('|')
   const segmentsKey = segments.map(s => `${s.id}:${s.fromLat},${s.fromLng}->${s.toLat},${s.toLng}:${s.path?.length ?? 0}`).join('|')
 
   useEffect(() => { onPinClickRef.current = onPinClick }, [onPinClick])
   useEffect(() => { onPoisLoadedRef.current = onPoisLoaded }, [onPoisLoaded])
+  useEffect(() => { onSavePlaceRef.current = onSavePlace }, [onSavePlace])
   useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
   useEffect(() => { placeContextRef.current = placeContext }, [placeContext])
 
@@ -99,9 +126,9 @@ export default function MapView({
     if (!el.current || mapRef.current) return
     const map = L.map(el.current, {
       zoomControl: false,
-      worldCopyJump: false,
-      maxBounds: WORLD_BOUNDS,
-      maxBoundsViscosity: 1,
+      // Jump markers onto the visible world copy when panning across ±180°
+      worldCopyJump: true,
+      // No maxBounds — longitude wraps so Japan → Seattle can cross the Pacific
       minZoom: 2,
     }).setView([20, 0], 2)
     mapRef.current = map
@@ -109,12 +136,62 @@ export default function MapView({
     L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
       attribution: 'Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics | © OpenStreetMap contributors',
       maxZoom: 19,
-      noWrap: true,
-      bounds: WORLD_BOUNDS,
+      // Repeat tiles horizontally so Japan ↔ Seattle can cross the Pacific
+      noWrap: false,
     }).addTo(map)
     layerRef.current = L.layerGroup().addTo(map)
     poiLayerRef.current = L.layerGroup().addTo(map)
     userLayerRef.current = L.layerGroup().addTo(map)
+
+    const onPopupClick = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null
+      const btn = t?.closest?.('.map-save-btn, [data-save-pin]') as HTMLElement | null
+      if (!btn) return
+      e.preventDefault()
+      e.stopPropagation()
+      if (!onSavePlaceRef.current) return
+
+      const id = btn.getAttribute('data-save-pin')
+      if (id) {
+        const pin = pinMetaRef.current[id]
+        const poi = poiCacheRef.current[id]
+        if (pin) {
+          onSavePlaceRef.current({
+            name: pin.name || 'Saved place',
+            place_name: pin.name,
+            lat: pin.lat,
+            lng: pin.lng,
+            category: pin.kind || 'other',
+          })
+          btn.textContent = 'Saved ✓'
+          btn.setAttribute('disabled', 'true')
+          return
+        }
+        if (poi) {
+          onSavePlaceRef.current({
+            name: poi.name,
+            place_name: poi.name,
+            lat: poi.lat,
+            lng: poi.lng,
+            category: poi.category,
+          })
+          btn.textContent = 'Saved ✓'
+          btn.setAttribute('disabled', 'true')
+          return
+        }
+      }
+
+      const lat = parseFloat(btn.getAttribute('data-save-lat') || '')
+      const lng = parseFloat(btn.getAttribute('data-save-lng') || '')
+      const name = btn.getAttribute('data-save-name') || 'Place'
+      const category = btn.getAttribute('data-save-category') || 'other'
+      const place_name = btn.getAttribute('data-save-place') || name
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return
+      onSavePlaceRef.current({ name, place_name, lat, lng, category })
+      btn.textContent = 'Saved ✓'
+      btn.setAttribute('disabled', 'true')
+    }
+    el.current.addEventListener('click', onPopupClick)
 
     const syncSize = () => { map.invalidateSize({ animate: false }) }
     requestAnimationFrame(syncSize)
@@ -129,13 +206,12 @@ export default function MapView({
     window.addEventListener('resize', syncSize)
 
     return () => {
+      el.current?.removeEventListener('click', onPopupClick)
       window.clearTimeout(t1)
       window.clearTimeout(t2)
       window.removeEventListener('resize', syncSize)
       ro?.disconnect()
-      if (watchIdRef.current != null && navigator.geolocation) {
-        navigator.geolocation.clearWatch(watchIdRef.current)
-      }
+      if (watchIdRef.current != null && navigator.geolocation) navigator.geolocation.clearWatch(watchIdRef.current)
       map.remove()
       mapRef.current = null
       layerRef.current = null
@@ -155,39 +231,42 @@ export default function MapView({
     const pts: L.LatLngExpression[] = []
 
     segments.forEach(s => {
-      const a = L.latLng(s.fromLat, s.fromLng), b = L.latLng(s.toLat, s.toLng)
-      const line: L.LatLng[] = s.path && s.path.length > 1 ? s.path.map(p => L.latLng(p.lat, p.lng)) : [a, b]
+      const a = L.latLng(s.fromLat, s.fromLng)
+      const b = L.latLng(s.toLat, unwrapLng(s.toLng, s.fromLng))
+      const raw: L.LatLng[] = s.path && s.path.length > 1
+        ? s.path.map(p => L.latLng(p.lat, p.lng))
+        : [a, L.latLng(s.toLat, s.toLng)]
+      const line = unwrapPath(raw)
       line.forEach(p => pts.push(p))
-      const groups: L.LatLng[][] = [[line[0]]]
-      for (let i = 1; i < line.length; i++) {
-        if (Math.abs(line[i].lng - line[i - 1].lng) > 180) groups.push([line[i]])
-        else groups[groups.length - 1].push(line[i])
+      if (line.length > 1) {
+        L.polyline(line, { color: '#F97316', weight: 5, opacity: 0.95 }).bindPopup(s.label).addTo(layer)
       }
-      groups.forEach(g => { if (g.length > 1) L.polyline(g, { color: '#F97316', weight: 5, opacity: 0.95 }).bindPopup(s.label).addTo(layer) })
       const dot = (pos: L.LatLng, num: number, kind: 'start' | 'finish') =>
         L.marker(pos, { icon: L.divIcon({ className: 'endpoint-icon', html: `<div class="endpoint-label ${kind}">${num}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }), zIndexOffset: 1000 }).bindPopup(s.label)
-      dot(a, 1, 'start').addTo(layer)
-      dot(b, 2, 'finish').addTo(layer)
-      let midIdx = Math.floor(line.length / 2)
-      while (midIdx > 0 && Math.abs(line[midIdx].lng - line[midIdx - 1].lng) > 180) midIdx--
-      arrowAt(line[Math.max(0, midIdx - 1)], line[midIdx]).addTo(layer)
+      dot(line[0] || a, 1, 'start').addTo(layer)
+      dot(line[line.length - 1] || b, 2, 'finish').addTo(layer)
+      const midIdx = Math.floor(line.length / 2)
+      if (line.length > 1) arrowAt(line[Math.max(0, midIdx - 1)], line[midIdx]).addTo(layer)
     })
 
+    // Unwrap pins relative to the first pin so Pacific-spanning trips fit tightly
+    const pinRefLng = pins[0]?.lng ?? 0
     pins.forEach(p => {
-      pts.push([p.lat, p.lng])
+      const lng = unwrapLng(p.lng, pinRefLng)
+      pts.push([p.lat, lng])
       const selected = selectedIdRef.current === p.id
-      const m = L.marker([p.lat, p.lng], {
-        icon: itineraryIcon(p.number, selected, p.kind),
+      const m = L.marker([p.lat, lng], {
+        icon: emojiPinIcon(p.kind, p.number, selected),
         zIndexOffset: selected ? 800 : 200,
-      }).bindPopup(p.label)
+      }).bindPopup(p.label, { maxWidth: 280, className: 'ttl-popup' })
       m.on('click', () => onPinClickRef.current?.(p.id))
       m.addTo(layer)
       markersRef.current[p.id] = m
-      pinMetaRef.current[p.id] = { number: p.number, kind: p.kind }
+      pinMetaRef.current[p.id] = { number: p.number, kind: p.kind, name: p.name, savable: p.savable, lat: p.lat, lng: p.lng }
     })
 
     if (showRoute && pins.length > 1) {
-      const routePts = pins.map(p => L.latLng(p.lat, p.lng))
+      const routePts = unwrapPath(pins.map(p => L.latLng(p.lat, p.lng)))
       L.polyline(routePts, { color: '#1F2937', weight: 2, dashArray: '6 6', opacity: 0.8 }).addTo(layer)
       for (let i = 0; i < routePts.length - 1; i++) arrowAt(routePts[i], routePts[i + 1]).addTo(layer)
     }
@@ -209,7 +288,7 @@ export default function MapView({
     Object.entries(markersRef.current).forEach(([id, m]) => {
       const selected = selectedId === id
       const meta = pinMetaRef.current[id]
-      m.setIcon(itineraryIcon(meta?.number, selected, meta?.kind))
+      m.setIcon(emojiPinIcon(meta?.kind, meta?.number, selected))
       m.setZIndexOffset(selected ? 800 : 200)
       if (selected) {
         m.openPopup()
@@ -218,7 +297,6 @@ export default function MapView({
     })
   }, [selectedId, pinsKey])
 
-  // Nearby POIs — lower zoom threshold, wider bbox, Nominatim fallback inside fetchNearbyPois
   useEffect(() => {
     const map = mapRef.current
     const poiLayer = poiLayerRef.current
@@ -246,10 +324,7 @@ export default function MapView({
         return
       }
       const b = map.getBounds()
-      const spanLng = Math.abs(b.getEast() - b.getWest())
-      const spanLat = Math.abs(b.getNorth() - b.getSouth())
-      // Only skip extremely large areas (whole countries)
-      if (spanLng > 4 || spanLat > 4) {
+      if (Math.abs(b.getEast() - b.getWest()) > 4 || Math.abs(b.getNorth() - b.getSouth()) > 4) {
         clearPois()
         setPoiStatus('zoom')
         setPoiCount(0)
@@ -259,17 +334,17 @@ export default function MapView({
       controller = new AbortController()
       setPoiStatus('loading')
       fetchNearbyPois({
-        south: b.getSouth(),
-        west: b.getWest(),
-        north: b.getNorth(),
-        east: b.getEast(),
+        south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast(),
       }, { signal: controller.signal, placeContext: placeContextRef.current }).then(pois => {
         if (aborted) return
         clearPois()
+        poiCacheRef.current = {}
         pois.forEach(p => {
-          L.marker([p.lat, p.lng], { icon: poiIcon(p), zIndexOffset: 50 })
-            .bindPopup(p.label, { maxWidth: 260 })
-            .addTo(poiLayer)
+          poiCacheRef.current[p.id] = p
+          L.marker([p.lat, p.lng], {
+            icon: emojiPinIcon(p.category, undefined, false),
+            zIndexOffset: 50,
+          }).bindPopup(p.label, { maxWidth: 280, className: 'ttl-popup' }).addTo(poiLayer)
         })
         setPoiCount(pois.length)
         setPoiStatus(pois.length ? 'ready' : 'empty')
@@ -321,16 +396,10 @@ export default function MapView({
       userMarkerRef.current = L.marker(latlng, { icon: userLocationIcon(), zIndexOffset: 1200 })
         .bindPopup('<b>You are here</b>')
         .addTo(userLayer)
-    } else {
-      userMarkerRef.current.setLatLng(latlng)
-    }
+    } else userMarkerRef.current.setLatLng(latlng)
     if (!accuracyRef.current) {
       accuracyRef.current = L.circle(latlng, {
-        radius: Math.min(accuracy || 40, 400),
-        color: '#3B82F6',
-        fillColor: '#3B82F6',
-        fillOpacity: 0.15,
-        weight: 1,
+        radius: Math.min(accuracy || 40, 400), color: '#3B82F6', fillColor: '#3B82F6', fillOpacity: 0.15, weight: 1,
       }).addTo(userLayer)
     } else {
       accuracyRef.current.setLatLng(latlng)
@@ -341,23 +410,13 @@ export default function MapView({
   }
 
   const locateMe = () => {
-    if (!navigator.geolocation) {
-      alert('Geolocation is not supported in this browser.')
-      return
-    }
-    if (locStatus === 'on' || locStatus === 'pending') {
-      stopWatching()
-      return
-    }
+    if (!navigator.geolocation) { alert('Geolocation is not supported in this browser.'); return }
+    if (locStatus === 'on' || locStatus === 'pending') { stopWatching(); return }
     setLocStatus('pending')
     navigator.geolocation.getCurrentPosition(
       pos => {
         applyPosition(pos, true)
-        watchIdRef.current = navigator.geolocation.watchPosition(
-          p => applyPosition(p, false),
-          () => {},
-          { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 },
-        )
+        watchIdRef.current = navigator.geolocation.watchPosition(p => applyPosition(p, false), () => {}, { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 })
       },
       err => {
         setLocStatus('denied')
@@ -379,40 +438,20 @@ export default function MapView({
       <div ref={el} className="map-leaflet-host" />
       <div className="map-toolbar">
         {showUserLocation && (
-          <button
-            type="button"
-            className={`btn-secondary btn-small map-loc-btn${locStatus === 'on' ? ' active' : ''}`}
-            onClick={locateMe}
-            aria-pressed={locStatus === 'on'}
-          >
+          <button type="button" className={`btn-secondary btn-small map-loc-btn${locStatus === 'on' ? ' active' : ''}`} onClick={locateMe} aria-pressed={locStatus === 'on'}>
             {locStatus === 'pending' ? 'Locating…' : locStatus === 'on' ? 'Hide my location' : 'My location'}
           </button>
         )}
         {enableNearbyPois && (
           <>
-            <button
-              type="button"
-              className={`btn-secondary btn-small map-poi-toggle${poisOn ? ' active' : ''}`}
-              onClick={() => setPoisOn(v => !v)}
-              aria-pressed={poisOn}
-            >
+            <button type="button" className={`btn-secondary btn-small map-poi-toggle${poisOn ? ' active' : ''}`} onClick={() => setPoisOn(v => !v)} aria-pressed={poisOn}>
               {poisOn ? 'Nearby places on' : 'Nearby places off'}
             </button>
-            {poisOn && poiStatus === 'zoom' && (
-              <span className="map-poi-hint">Zoom in closer to load map pins</span>
-            )}
-            {poisOn && poiStatus === 'loading' && (
-              <span className="map-poi-hint">Loading places…</span>
-            )}
-            {poisOn && poiStatus === 'ready' && (
-              <span className="map-poi-hint">{poiCount} places nearby</span>
-            )}
-            {poisOn && poiStatus === 'empty' && (
-              <span className="map-poi-hint">No places found here — try another area</span>
-            )}
-            {poisOn && poiStatus === 'error' && (
-              <span className="map-poi-hint">Couldn’t load places — try again in a moment</span>
-            )}
+            {poisOn && poiStatus === 'zoom' && <span className="map-poi-hint">Zoom in closer to load map pins</span>}
+            {poisOn && poiStatus === 'loading' && <span className="map-poi-hint">Loading places…</span>}
+            {poisOn && poiStatus === 'ready' && <span className="map-poi-hint">{poiCount} places nearby</span>}
+            {poisOn && poiStatus === 'empty' && <span className="map-poi-hint">No places found here — try another area</span>}
+            {poisOn && poiStatus === 'error' && <span className="map-poi-hint">Couldn’t load places — try again in a moment</span>}
           </>
         )}
       </div>

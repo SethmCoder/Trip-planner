@@ -15,6 +15,17 @@ export interface ItineraryItem {
   start_at: string; end_at: string; duration_minutes: number | null; mode_of_transport: string
   booking_status: BookingStatus; booking_open_date: string; book_by_date: string; image_url: string; sort_order: number; created_at: string
 }
+/** User bookmark of a map/search place (persisted in localStorage or Supabase). */
+export interface SavedPlace {
+  id: string
+  user_id: string
+  name: string
+  place_name: string
+  lat: number
+  lng: number
+  category: string
+  created_at: string
+}
 export const newId = () => (crypto?.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now())
 export const fmtDate = (d: string) => d ? new Date(d.length <= 10 ? d + 'T12:00:00' : d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ''
 export const bookingStatusLabel = (s: BookingStatus) =>

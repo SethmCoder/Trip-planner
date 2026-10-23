@@ -74,6 +74,7 @@ export default function TopBar() {
         {open && (
           <div className="topbar-menu" role="menu">
             <button type="button" role="menuitem" onClick={() => { setOpen(false); nav('/') }}>Main Page</button>
+            <button type="button" role="menuitem" onClick={() => { setOpen(false); nav('/saved') }}>Saved Places</button>
             <button type="button" role="menuitem" onClick={() => { setOpen(false); nav('/settings') }}>Settings</button>
             <button type="button" role="menuitem" onClick={async () => { await logout(); nav('/login') }}>Logout</button>
           </div>

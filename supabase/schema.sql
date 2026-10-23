@@ -39,12 +39,25 @@ alter table public.itinerary_items add column if not exists booking_open_date da
 alter table public.itinerary_items add column if not exists book_by_date date;
 -- For existing projects: allow 'restaurant' as an itinerary item type
 alter type item_type add value if not exists 'restaurant';
+create table if not exists public.saved_places (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  name text not null default '',
+  place_name text not null default '',
+  lat double precision not null,
+  lng double precision not null,
+  category text not null default 'other',
+  created_at timestamptz not null default now()
+);
+alter table public.saved_places add column if not exists category text not null default 'other';
 create index if not exists idx_trips_user on public.trips(user_id);
 create index if not exists idx_items_trip on public.itinerary_items(trip_id, sort_order);
+create index if not exists idx_saved_places_user on public.saved_places(user_id, created_at desc);
 
 alter table public.profiles enable row level security;
 alter table public.trips enable row level security;
 alter table public.itinerary_items enable row level security;
+alter table public.saved_places enable row level security;
 drop policy if exists "own profile" on public.profiles;
 create policy "own profile" on public.profiles for all using (auth.uid() = id) with check (auth.uid() = id);
 -- Allow username->email lookup for login (only email column is used by app)
@@ -54,6 +67,8 @@ drop policy if exists "own trips" on public.trips;
 create policy "own trips" on public.trips for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 drop policy if exists "own items" on public.itinerary_items;
 create policy "own items" on public.itinerary_items for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "own saved places" on public.saved_places;
+create policy "own saved places" on public.saved_places for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 create or replace function public.handle_new_user() returns trigger language plpgsql security definer as $$
 begin insert into public.profiles (id, email, username) values (new.id, new.email, split_part(new.email,'@',1)) on conflict (id) do nothing; return new; end; $$;

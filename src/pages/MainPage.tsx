@@ -8,6 +8,7 @@ import DestinationThumb from '../components/DestinationThumb'
 import { useAuth } from '../context/AuthContext'
 import * as api from '../lib/data'
 import { searchPlaces, type GeoResult } from '../lib/geocoding'
+import { placePrimary, placeSecondary } from '../lib/formatPlace'
 import {
   bookingStatusLabel,
   formatDateRange,
@@ -76,28 +77,33 @@ function TripForm({
           if (v.length > 2) setResults(await searchPlaces(v))
           else setResults([])
         }}
-        placeholder="Search a place…"
+        placeholder="City or destination…"
         autoComplete="off"
       />
       {results.length > 0 && (
         <div className="autocomplete" role="listbox">
-          {results.map((r, i) => (
-            <button
-              key={`${r.lat}-${r.lng}-${i}`}
-              type="button"
-              role="option"
-              onClick={async () => {
-                const next = { ...trip, place: r.name, place_lat: r.lat, place_lng: r.lng, image_url: null as string | null }
-                onChange(next)
-                setPlaceQ(r.name)
-                setResults([])
-                const img = await resolveTripImage(r.name, r.lat, r.lng)
-                onChange({ ...next, image_url: img })
-              }}
-            >
-              {r.display}
-            </button>
-          ))}
+          {results.map((r, i) => {
+            const primary = placePrimary(r.name) || r.name
+            const secondary = r.detail || placeSecondary(r.display)
+            return (
+              <button
+                key={`${r.lat}-${r.lng}-${i}`}
+                type="button"
+                role="option"
+                onClick={async () => {
+                  const next = { ...trip, place: primary, place_lat: r.lat, place_lng: r.lng, image_url: null as string | null }
+                  onChange(next)
+                  setPlaceQ(primary)
+                  setResults([])
+                  const img = await resolveTripImage(primary, r.lat, r.lng)
+                  onChange({ ...next, image_url: img })
+                }}
+              >
+                <span className="ac-name">{primary}</span>
+                {secondary && <span className="ac-detail">{secondary}</span>}
+              </button>
+            )
+          })}
         </div>
       )}
 

@@ -1,44 +1,66 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import TopBar from '../components/TopBar'
-import MapView from '../components/MapView'
+import MapView, { type SavePlacePayload } from '../components/MapView'
+import { googleMapsUrl } from '../lib/maps'
 import MajorStopsInput from '../components/MajorStopsInput'
 import TransitTimeInput from '../components/TransitTimeInput'
-import StatusBadge from '../components/StatusBadge'
 import { useAuth } from '../context/AuthContext'
 import * as api from '../lib/data'
 import { searchPlaces, type GeoResult } from '../lib/geocoding'
 import { bookingLink, discoveryLinks } from '../lib/bookingLinks'
-import { newId, fmtDate, destinationThumbUrl, type Trip, type ItineraryItem } from '../lib/types'
+import { newId, fmtDate, type Trip, type ItineraryItem, type SavedPlace } from '../lib/types'
 import { calculateTransitMinutes, formatTransitTime, isFlight, addMinutes, getQuickestRoute, estimateGapTravel, formatCompactDuration, type LatLng, type GapTravel } from '../lib/routing'
-import { fetchExperiences, poiMeta, type MapPoi } from '../lib/pois'
-import { resolveTripImage } from '../lib/tripImages'
+import { buildPinPopup, categoryFromItemType, fetchExperiences, fetchHotelsNearby, poiMeta, type MapPoi } from '../lib/pois'
+import { resolvePlaceImage, resolveTripImage } from '../lib/tripImages'
 import { destinationTravelLinks, poiTravelLinks } from '../lib/travelApps'
-import { shortAddress, hotelStayTitle, hotelPhase } from '../lib/formatPlace'
+import { shortAddress, placePrimary, placeSecondary, hotelStayTitle, hotelPhase } from '../lib/formatPlace'
 import DestinationThumb from '../components/DestinationThumb'
 
 const STAY_COLORS = ['#2563EB', '#7C3AED', '#0891B2', '#DB2777', '#059669', '#D97706']
 
 function compactGeo(r: GeoResult): GeoResult {
-  return { ...r, name: shortAddress(r.name, 1) || r.name, display: shortAddress(r.display, 2) || r.display }
+  const name = placePrimary(r.name) || shortAddress(r.name, 1) || r.name
+  const detail = r.detail || placeSecondary(r.display) || shortAddress(r.display, 2)
+  return { ...r, name, display: detail ? `${name}, ${detail}` : name, detail }
 }
 
 function categoryMeta(it: ItineraryItem) {
-  if (it.type === 'transit') return { label: 'Transit', color: '#F97316', icon: '✈' }
-  if (it.type === 'hotel') return { label: it.subtype === 'checkout' ? 'Hotel · Check-out' : it.subtype === 'checkin' ? 'Hotel · Check-in' : 'Hotel', color: '#2563EB', icon: '🏨' }
-  if (it.type === 'restaurant') return { label: 'Restaurant', color: '#DC2626', icon: '🍽' }
-  return { label: 'Experience', color: '#0D9488', icon: '★' }
+  if (it.type === 'transit') return { label: 'Transit', color: '#F97316', icon: '🚅' }
+  if (it.type === 'hotel') return { label: it.subtype === 'checkout' ? 'Hotel · Check-out' : it.subtype === 'checkin' ? 'Hotel · Check-in' : 'Hotel', color: '#2563EB', icon: '🛏️' }
+  if (it.type === 'restaurant') return { label: 'Restaurant', color: '#DC2626', icon: '🍽️' }
+  return { label: 'Experience', color: '#0D9488', icon: '🗿' }
 }
 
-function ItemThumb({ it }: { it: ItineraryItem }) {
+function ItemThumb({ it, onResolved }: { it: ItineraryItem; onResolved?: (url: string) => void }) {
   const meta = categoryMeta(it)
+  const [src, setSrc] = useState<string | null>(it.image_url || null)
   const [failed, setFailed] = useState(false)
-  const src = !failed
-    ? (it.image_url || (it.lat != null && it.lng != null ? destinationThumbUrl(it.lat, it.lng, 14) : null))
-    : null
+  const onResolvedRef = useRef(onResolved)
+  onResolvedRef.current = onResolved
+
+  useEffect(() => {
+    setSrc(it.image_url || null)
+    setFailed(false)
+  }, [it.id, it.image_url])
+
+  useEffect(() => {
+    if (it.image_url || failed) return
+    let cancelled = false
+    const query = it.type === 'transit'
+      ? (it.to_name || it.title)
+      : (hotelStayTitle(it.title) || it.place_name || it.title)
+    resolvePlaceImage(query, it.lat, it.lng).then(url => {
+      if (cancelled || !url) return
+      setSrc(url)
+      onResolvedRef.current?.(url)
+    })
+    return () => { cancelled = true }
+  }, [it.id, it.image_url, it.title, it.place_name, it.to_name, it.type, it.lat, it.lng, failed])
+
   return (
     <div className="item-thumb" style={{ background: meta.color }} aria-hidden>
-      {src
+      {src && !failed
         ? <img src={src} alt="" onError={() => setFailed(true)} />
         : <span className="item-thumb-icon">{meta.icon}</span>}
     </div>
@@ -52,42 +74,77 @@ const baseItem = (trip: Trip, userId: string, order: number): ItineraryItem => (
   booking_status: 'not_booked', booking_open_date: '', book_by_date: '', image_url: '', sort_order: order, created_at: new Date().toISOString(),
 })
 
-function PlaceSearch({ label, onPick }: { label: string; onPick: (r: GeoResult) => void }) {
+function PlaceSearch({
+  label,
+  onPick,
+  near,
+  placeholder = 'Type a short place name…',
+}: {
+  label: string
+  onPick: (r: GeoResult) => void
+  near?: { lat: number; lng: number } | null
+  placeholder?: string
+}) {
   const [q, setQ] = useState('')
   const [res, setRes] = useState<GeoResult[]>([])
   const [picked, setPicked] = useState('')
+  const [searching, setSearching] = useState(false)
+
+  useEffect(() => {
+    if (picked || q.trim().length < 2) {
+      setRes([])
+      setSearching(false)
+      return
+    }
+    let cancelled = false
+    setSearching(true)
+    const timer = window.setTimeout(async () => {
+      const list = await searchPlaces(q, { near })
+      if (cancelled) return
+      setRes(list)
+      setSearching(false)
+    }, 280)
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [q, picked, near?.lat, near?.lng])
+
   return (
-    <div>
+    <div className="place-search">
       <label>{label}</label>
       <input
         value={picked || q}
-        onChange={async e => {
+        onChange={e => {
           setPicked('')
           setQ(e.target.value)
-          if (e.target.value.length > 2) setRes(await searchPlaces(e.target.value))
-          else setRes([])
         }}
-        placeholder="Search a place…"
+        placeholder={placeholder}
         autoComplete="off"
       />
+      {searching && <p className="places-hint">Searching…</p>}
       {res.length > 0 && (
         <div className="autocomplete" role="listbox">
-          {res.map((r, i) => (
-            <button
-              key={`${r.lat}-${r.lng}-${i}`}
-              type="button"
-              role="option"
-              onClick={() => {
-                const c = compactGeo(r)
-                onPick(c)
-                setPicked(c.name)
-                setRes([])
-              }}
-            >
-              <span className="ac-name">{shortAddress(r.name, 1) || r.name}</span>
-              <span className="ac-detail">{shortAddress(r.display, 3)}</span>
-            </button>
-          ))}
+          {res.map((r, i) => {
+            const primary = placePrimary(r.name) || r.name
+            const secondary = r.detail || placeSecondary(r.display) || shortAddress(r.display, 2)
+            return (
+              <button
+                key={`${r.lat}-${r.lng}-${i}`}
+                type="button"
+                role="option"
+                onClick={() => {
+                  const c = compactGeo(r)
+                  onPick(c)
+                  setPicked(c.name)
+                  setRes([])
+                }}
+              >
+                <span className="ac-name">{primary}</span>
+                {secondary && <span className="ac-detail">{secondary}</span>}
+              </button>
+            )
+          })}
         </div>
       )}
     </div>
@@ -113,6 +170,13 @@ export default function TripPage() {
   const [hotel, setHotel] = useState<GeoResult | null>(null)
   const [hIn, setHIn] = useState('')
   const [hOut, setHOut] = useState('')
+  const [stayKind, setStayKind] = useState<'hotel' | 'airbnb'>('hotel')
+  const [airbnbAddress, setAirbnbAddress] = useState('')
+  const [hotelPicks, setHotelPicks] = useState<MapPoi[]>([])
+  const [hotelListStatus, setHotelListStatus] = useState<'idle' | 'loading' | 'ready' | 'empty'>('idle')
+  const [expPicks, setExpPicks] = useState<MapPoi[]>([])
+  const [expPickStatus, setExpPickStatus] = useState<'idle' | 'loading' | 'ready' | 'empty'>('idle')
+  const [expTime, setExpTime] = useState('')
   const [act, setAct] = useState<GeoResult | null>(null)
   const [aTime, setATime] = useState('')
   const [rest, setRest] = useState<GeoResult | null>(null)
@@ -121,6 +185,8 @@ export default function TripPage() {
   const [rightTab, setRightTab] = useState<'places' | 'experiences'>('places')
   const [experiences, setExperiences] = useState<MapPoi[]>([])
   const [expStatus, setExpStatus] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'need-place'>('idle')
+  const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>([])
+  const [saveMsg, setSaveMsg] = useState('')
 
   useEffect(() => {
     if (id) {
@@ -133,6 +199,7 @@ export default function TripPage() {
           setHOut(`${t.end_date}T11:00`)
           setATime(`${t.start_date}T10:00`)
           setRTime(`${t.start_date}T19:00`)
+          setExpTime(`${t.start_date}T11:00`)
           if (t.place && !t.image_url) {
             const img = await resolveTripImage(t.place, t.place_lat, t.place_lng)
             if (img) {
@@ -146,6 +213,39 @@ export default function TripPage() {
       api.listItems(id).then(setItems)
     }
   }, [id])
+
+  useEffect(() => {
+    if (!profile) return
+    api.listSavedPlaces(profile.id).then(setSavedPlaces).catch(() => setSavedPlaces([]))
+  }, [profile])
+
+  // Nearby hotels & experiences for the Create Items lists (OSM / deep-linked apps)
+  useEffect(() => {
+    if (!trip?.place_lat || !trip?.place_lng) {
+      setHotelPicks([]); setHotelListStatus('idle')
+      setExpPicks([]); setExpPickStatus('idle')
+      return
+    }
+    let cancelled = false
+    const pad = 0.08
+    const bounds = {
+      south: trip.place_lat - pad, west: trip.place_lng - pad,
+      north: trip.place_lat + pad, east: trip.place_lng + pad,
+    }
+    setHotelListStatus('loading')
+    setExpPickStatus('loading')
+    fetchHotelsNearby(bounds, trip.place).then(list => {
+      if (cancelled) return
+      setHotelPicks(list)
+      setHotelListStatus(list.length ? 'ready' : 'empty')
+    })
+    fetchExperiences(bounds, trip.place).then(list => {
+      if (cancelled) return
+      setExpPicks(list)
+      setExpPickStatus(list.length ? 'ready' : 'empty')
+    })
+    return () => { cancelled = true }
+  }, [trip?.place_lat, trip?.place_lng, trip?.place])
 
   const days = useMemo(() => {
     const out: string[] = []
@@ -270,10 +370,23 @@ export default function TripPage() {
     try { await api.deleteTrip(trip.id); nav('/') } catch (x: any) { alert(`Could not delete the trip: ${x.message}`) }
   }
   const addItems = async (news: ItineraryItem[]) => {
-    const all = [...items, ...news]
+    const seeded = await Promise.all(news.map(async it => {
+      if (it.image_url) return it
+      const query = it.type === 'transit' ? (it.to_name || it.title) : (hotelStayTitle(it.title) || it.place_name || it.title)
+      const image_url = (await resolvePlaceImage(query, it.lat, it.lng)) || ''
+      return { ...it, image_url }
+    }))
+    const all = [...items, ...seeded]
     setItems(all)
-    if (news[0]) setExpandedId(news[0].id)
-    await api.saveItems(news)
+    if (seeded[0]) setExpandedId(seeded[0].id)
+    await api.saveItems(seeded)
+  }
+
+  const persistThumb = async (it: ItineraryItem, url: string) => {
+    if (it.image_url === url) return
+    const updated = { ...it, image_url: url }
+    setItems(prev => prev.map(x => x.id === it.id ? updated : x))
+    try { await api.saveItem(updated) } catch { /* ignore */ }
   }
   const update = async (it: ItineraryItem) => {
     let all = items.map(x => x.id === it.id ? it : x)
@@ -305,8 +418,23 @@ export default function TripPage() {
     alert(`Transit time: ${formatTransitTime(calc.minutes, it.mode_of_transport)}${isFlight(it.mode_of_transport) ? ' (hour:minute)' : ' minutes'} — ${calc.source}`)
   }
   const addHotel = () => {
-    if (!hotel) return alert('Pick a hotel / place')
     const gid = newId()
+    if (stayKind === 'airbnb') {
+      const addr = airbnbAddress.trim()
+      if (!addr) return alert('Enter an Airbnb address')
+      const title = shortAddress(addr, 1) || 'Airbnb'
+      const common = {
+        ...baseItem(trip, profile.id, items.length), type: 'hotel' as const, group_id: gid,
+        title, place_name: shortAddress(addr, 2) || addr,
+        lat: trip.place_lat, lng: trip.place_lng,
+      }
+      addItems([
+        { ...common, id: newId(), subtype: 'checkin', title: `${title} (Check-in)`, start_at: hIn, end_at: hIn, sort_order: items.length },
+        { ...common, id: newId(), subtype: 'checkout', title: `${title} (Check-out)`, start_at: hOut, end_at: hOut, sort_order: items.length + 1 },
+      ])
+      return
+    }
+    if (!hotel) return alert('Pick a hotel from the list or search')
     const place = shortAddress(hotel.display, 2) || hotel.name
     const common = { ...baseItem(trip, profile.id, items.length), type: 'hotel' as const, group_id: gid, title: hotel.name, place_name: place, lat: hotel.lat, lng: hotel.lng }
     addItems([
@@ -314,12 +442,32 @@ export default function TripPage() {
       { ...common, id: newId(), subtype: 'checkout', title: `${hotel.name} (Check-out)`, start_at: hOut, end_at: hOut, sort_order: items.length + 1 },
     ])
   }
+
+  const addHotelFromList = (p: MapPoi) => {
+    setHotel({ name: p.name, display: p.name, lat: p.lat, lng: p.lng })
+    setStayKind('hotel')
+  }
+
+  const addExperienceFromList = async (p: MapPoi) => {
+    await addItems([{
+      ...baseItem(trip, profile.id, items.length),
+      type: 'activity',
+      title: p.name,
+      place_name: shortAddress(trip.place, 2) || p.name,
+      lat: p.lat,
+      lng: p.lng,
+      start_at: expTime || `${trip.start_date}T11:00`,
+      end_at: expTime || `${trip.start_date}T11:00`,
+      image_url: '',
+    }])
+  }
+
   const addActivity = () => {
     if (!act) return alert('Pick a place to visit')
     addItems([{
       ...baseItem(trip, profile.id, items.length), type: 'activity', title: act.name,
       place_name: shortAddress(act.display, 2) || act.name, lat: act.lat, lng: act.lng,
-      start_at: aTime, end_at: aTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(act.name)}/400/220`,
+      start_at: aTime, end_at: aTime, image_url: '',
     }])
   }
   const addRestaurant = () => {
@@ -327,7 +475,7 @@ export default function TripPage() {
     addItems([{
       ...baseItem(trip, profile.id, items.length), type: 'restaurant', title: rest.name,
       place_name: shortAddress(rest.display, 2) || rest.name, lat: rest.lat, lng: rest.lng,
-      start_at: rTime, end_at: rTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(rest.name + '-food')}/400/220`,
+      start_at: rTime, end_at: rTime, image_url: '',
     }])
   }
 
@@ -346,22 +494,47 @@ export default function TripPage() {
     ? ordered.filter(i => i.start_at.slice(0, 10) === selectedDay && i.lat != null && i.lng != null)
     : ordered.filter(i => i.lat != null && i.lng != null)
 
-  const pins: { id: string; lat: number; lng: number; label: string; number?: number; kind?: string }[] =
-    mapSourceItems.map((i, ix) => ({
+  const pins = mapSourceItems.map((i, ix) => {
+    const title = shortAddress(i.title, 1) || i.title || 'Stop'
+    const kind = categoryFromItemType(i.type, i.mode_of_transport)
+    return {
       id: i.id,
       lat: i.lat!,
       lng: i.lng!,
-      label: `<b>${shortAddress(i.title, 1) || i.title}</b><br/>${categoryMeta(i).label}<br/>${shortAddress(i.place_name)}`,
+      name: title,
       number: ix + 1,
-      kind: i.type,
-    }))
+      kind,
+      savable: true,
+      label: buildPinPopup({
+        title,
+        category: kind,
+        place: shortAddress(i.place_name),
+        lat: i.lat!,
+        lng: i.lng!,
+        savable: true,
+        pinId: i.id,
+      }),
+    }
+  })
   if (pins.length === 0 && !selectedDay && trip.place_lat != null && trip.place_lng != null) {
+    const title = shortAddress(trip.place, 1) || trip.name || 'Destination'
     pins.push({
       id: `trip-dest-${trip.id}`,
       lat: trip.place_lat,
       lng: trip.place_lng,
-      label: `<b>${trip.name || 'Trip'}</b><br/>${shortAddress(trip.place)}`,
-      kind: 'destination',
+      name: title,
+      kind: 'attraction',
+      savable: true,
+      number: undefined as unknown as number,
+      label: buildPinPopup({
+        title,
+        category: 'attraction',
+        place: shortAddress(trip.place),
+        lat: trip.place_lat,
+        lng: trip.place_lng,
+        savable: true,
+        pinId: `trip-dest-${trip.id}`,
+      }),
     })
   }
 
@@ -411,6 +584,11 @@ export default function TripPage() {
     await api.saveItems(arr)
   }
   const fmtWhen = (iso: string) => iso ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
+  const fmtDay = (iso: string) => iso ? new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : ''
+  const fmtClock = (iso: string) => iso ? new Date(iso).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' }) : ''
+  const near = trip.place_lat != null && trip.place_lng != null
+    ? { lat: trip.place_lat, lng: trip.place_lng }
+    : null
 
   const addExperienceToTrip = async (poi: MapPoi) => {
     if (!profile || !trip) return
@@ -434,6 +612,50 @@ export default function TripPage() {
     setMobilePanel('map')
   }
 
+  const persistSavePlace = async (payload: SavePlacePayload) => {
+    if (!profile) return
+    const exists = savedPlaces.some(p =>
+      Math.abs(p.lat - payload.lat) < 0.0002 && Math.abs(p.lng - payload.lng) < 0.0002,
+    )
+    if (exists) {
+      setSaveMsg('Already in your saved list')
+      window.setTimeout(() => setSaveMsg(''), 2500)
+      return
+    }
+    const place: SavedPlace = {
+      id: newId(),
+      user_id: profile.id,
+      name: payload.name,
+      place_name: payload.place_name || payload.name,
+      lat: payload.lat,
+      lng: payload.lng,
+      category: payload.category || 'other',
+      created_at: new Date().toISOString(),
+    }
+    try {
+      await api.saveSavedPlace(place)
+      setSavedPlaces(prev => [place, ...prev])
+      setSaveMsg(`Saved “${place.name}”`)
+      window.setTimeout(() => setSaveMsg(''), 2500)
+    } catch (e: any) {
+      alert(`Could not save place: ${e.message}`)
+    }
+  }
+
+  const saveItemPlace = async (it: ItineraryItem) => {
+    if (it.lat == null || it.lng == null) {
+      alert('This item needs a map location before it can be saved.')
+      return
+    }
+    await persistSavePlace({
+      name: shortAddress(it.title, 1) || it.title || 'Place',
+      place_name: shortAddress(it.place_name) || it.place_name || it.title,
+      lat: it.lat,
+      lng: it.lng,
+      category: categoryFromItemType(it.type),
+    })
+  }
+
   const card = (it: ItineraryItem) => {
     const link = bookingLink(it)
     const extra = discoveryLinks(it)
@@ -442,20 +664,18 @@ export default function TripPage() {
     const cat = categoryMeta(it)
     const stayNum = it.type === 'hotel' && it.group_id ? hotelStayIndex.get(it.group_id) : undefined
     const stayColor = stayNum ? STAY_COLORS[(stayNum - 1) % STAY_COLORS.length] : cat.color
-    const displayTitle = it.type === 'hotel' ? hotelStayTitle(it.title) : (it.title || 'Untitled')
-    const placeLine = it.type === 'transit'
-      ? `${shortAddress(it.from_name, 1) || '?'} → ${shortAddress(it.to_name, 1) || '?'}`
-      : shortAddress(it.place_name) || shortAddress(it.title, 1)
-    const timeLine = it.type === 'hotel'
-      ? `${hotelPhase(it.subtype)} · ${fmtWhen(it.start_at)}`
-      : it.type === 'transit'
-        ? `${fmtWhen(it.start_at)}${it.mode_of_transport ? ` · ${it.mode_of_transport}` : ''}${it.duration_minutes != null ? ` · ${formatTransitTime(it.duration_minutes, it.mode_of_transport)}${isFlight(it.mode_of_transport) ? '' : ' min'}` : ''}`
-        : fmtWhen(it.start_at)
+    const addressLine = it.type === 'transit'
+      ? `${placePrimary(it.from_name) || '?'} → ${placePrimary(it.to_name) || '?'}`
+      : placePrimary(it.place_name) || placePrimary(hotelStayTitle(it.title)) || placePrimary(it.title) || 'Place'
+    const dateLine = it.type === 'hotel'
+      ? `${hotelPhase(it.subtype)} · ${fmtDay(it.start_at)}`
+      : fmtDay(it.start_at)
+    const timeLine = fmtClock(it.start_at)
 
     return (
       <div
         key={it.id}
-        className={`place-card place-card-${it.type}${isOpen ? ' open' : ''}${stayNum ? ` stay-${stayNum}` : ''}`}
+        className={`place-card place-card-compact place-card-${it.type}${isOpen ? ' open' : ''}${stayNum ? ` stay-${stayNum}` : ''}`}
         style={{ borderLeftColor: stayColor }}
         draggable
         onDragStart={() => setDragId(it.id)}
@@ -463,29 +683,25 @@ export default function TripPage() {
         onDrop={() => onDrop(it.id)}
       >
         <div className="place-card-summary" onClick={toggle} title={isOpen ? 'Click to collapse' : 'Click to expand'}>
-          <ItemThumb it={it} />
+          <ItemThumb it={it} onResolved={url => persistThumb(it, url)} />
           <div className="place-card-main">
-            <div className="place-card-badges">
-              <span className="cat-badge" style={{ background: `${cat.color}18`, color: cat.color, borderColor: `${cat.color}55` }}>
-                {cat.icon} {cat.label}
-              </span>
-              {stayNum != null && (
-                <span className="stay-badge" style={{ background: stayColor }}>{`Stay ${stayNum}`}</span>
-              )}
-            </div>
-            <div className="place-card-title">{displayTitle}</div>
-            {placeLine && <div className="place-card-place">{placeLine}</div>}
-            {timeLine && <div className="place-card-time">{timeLine}</div>}
-            {(it.booking_open_date || it.book_by_date) && (
-              <div className="place-card-booking-dates">
-                {it.booking_open_date ? `Opens ${fmtDate(it.booking_open_date)}` : ''}
-                {it.booking_open_date && it.book_by_date ? ' · ' : ''}
-                {it.book_by_date ? `Book by ${fmtDate(it.book_by_date)}` : ''}
-              </div>
-            )}
+            <span className="place-card-place">{addressLine}</span>
+            <span className="place-card-time">
+              {dateLine}{timeLine ? ` · ${timeLine}` : ''}
+            </span>
           </div>
           <div className="place-card-actions">
-            <StatusBadge status={it.booking_status} />
+            {it.lat != null && it.lng != null && (
+              <button
+                type="button"
+                className="place-icon-btn"
+                title="Save place"
+                aria-label="Save place"
+                onClick={e => { e.stopPropagation(); saveItemPlace(it) }}
+              >
+                ☆
+              </button>
+            )}
             <button type="button" className="place-icon-btn" aria-label={isOpen ? 'Collapse' : 'Expand'} onClick={e => { e.stopPropagation(); toggle() }}>
               {isOpen ? '▾' : '▸'}
             </button>
@@ -568,6 +784,16 @@ export default function TripPage() {
                 ))}
               </div>
             )}
+            {it.lat != null && it.lng != null && (
+              <button
+                type="button"
+                className="btn-secondary btn-small"
+                style={{ display: 'block', marginTop: 12 }}
+                onClick={() => saveItemPlace(it)}
+              >
+                Save place
+              </button>
+            )}
             <button
               type="button"
               className="btn-danger btn-small"
@@ -605,40 +831,112 @@ export default function TripPage() {
     ? 'End date must be on or after the start date.'
     : null
 
-  // Left sidebar kept as-is for consistency across pages (structure/labels/actions unchanged)
   const createSidebar = (
     <aside className="panel trip-create-sidebar">
       <button className="btn-outline btn-small" onClick={() => nav('/')}>← All Trips</button>
       <button className="btn-outline btn-small" onClick={deleteThisTrip} style={{ marginLeft: 8, color: '#c00', borderColor: '#c00' }}>Delete Trip</button>
       <h3 style={{ fontFamily: "'Courier New',monospace" }}>Create Items</h3>
+      {saveMsg && <p className="saved-toast">{saveMsg}</p>}
+
       <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6 }}>
         <h4>Transit</h4>
-        <PlaceSearch label="From" onPick={setFrom} />
-        <PlaceSearch label="To" onPick={setTo} />
+        <PlaceSearch label="From" onPick={setFrom} near={near} placeholder="Airport, station…" />
+        <PlaceSearch label="To" onPick={setTo} near={near} placeholder="Airport, station…" />
         <label>Mode</label><input value={mode} onChange={e => setMode(e.target.value)} />
         <label>Departure</label><input type="datetime-local" value={tStart} onChange={e => setTStart(e.target.value)} />
         <label>Arrival</label><input type="datetime-local" value={tEnd} onChange={e => setTEnd(e.target.value)} />
         <button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addTransit}>Add Transit</button>
       </div>
+
       <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}>
         <h4>Hotel / Stay</h4>
-        <PlaceSearch label="Hotel / Place" onPick={setHotel} />
+        <div className="stay-kind-toggle" role="group" aria-label="Stay type">
+          <button type="button" className={stayKind === 'hotel' ? 'active' : ''} onClick={() => setStayKind('hotel')}>Hotel</button>
+          <button type="button" className={stayKind === 'airbnb' ? 'active' : ''} onClick={() => setStayKind('airbnb')}>Airbnb</button>
+        </div>
+
+        {stayKind === 'hotel' ? (
+          <>
+            <p className="places-hint">Pick from nearby hotels (OSM) or Booking / Google Maps links.</p>
+            {hotelListStatus === 'loading' && <p className="places-hint">Loading hotels…</p>}
+            {hotelListStatus === 'empty' && <p className="places-hint">No hotels found nearby — search below.</p>}
+            <div className="pick-list">
+              {hotelPicks.slice(0, 8).map(p => (
+                <button
+                  key={p.id}
+                  type="button"
+                  className={`pick-row${hotel?.name === p.name ? ' selected' : ''}`}
+                  onClick={() => addHotelFromList(p)}
+                >
+                  <span>🛏️ {p.name}</span>
+                  <a href={googleMapsUrl({ lat: p.lat, lng: p.lng, name: p.name })} target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}>Maps</a>
+                </button>
+              ))}
+            </div>
+            <PlaceSearch label="Or search a hotel" onPick={r => { setHotel(r); setStayKind('hotel') }} near={near} placeholder="Hotel name…" />
+            {hotel && <p className="places-hint">Selected: <b>{hotel.name}</b></p>}
+            <div className="travel-link-row" style={{ marginTop: 8 }}>
+              <a className="travel-chip" href={`https://www.booking.com/searchresults.html?ss=${encodeURIComponent(trip.place || '')}`} target="_blank" rel="noreferrer">Booking.com</a>
+              <a className="travel-chip" href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`hotels near ${trip.place || ''}`)}`} target="_blank" rel="noreferrer">Google Hotels</a>
+              <a className="travel-chip" href={`https://www.tripadvisor.com/Search?q=${encodeURIComponent(`hotels ${trip.place || ''}`)}`} target="_blank" rel="noreferrer">TripAdvisor</a>
+            </div>
+          </>
+        ) : (
+          <>
+            <label>Airbnb address</label>
+            <input value={airbnbAddress} onChange={e => setAirbnbAddress(e.target.value)} placeholder="Street address or listing name" />
+            <div className="travel-link-row" style={{ marginTop: 8 }}>
+              <a className="travel-chip" href={`https://www.airbnb.com/s/${encodeURIComponent(trip.place || '')}/homes`} target="_blank" rel="noreferrer">Search Airbnb</a>
+            </div>
+          </>
+        )}
+
         <label>Beginning of Stay</label><input type="datetime-local" value={hIn} onChange={e => setHIn(e.target.value)} />
         <label>End of Stay</label><input type="datetime-local" value={hOut} onChange={e => setHOut(e.target.value)} />
-        <button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addHotel}>Add Hotel / Stay</button>
+        <button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addHotel}>
+          {stayKind === 'airbnb' ? 'Add Airbnb Stay' : 'Add Hotel Stay'}
+        </button>
         <p style={{ fontSize: 11 }}>Adds a check-in and a check-out card.</p>
       </div>
+
       <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}>
         <h4>Things to Do</h4>
-        <PlaceSearch label="Place" onPick={setAct} />
+        <PlaceSearch label="Place" onPick={setAct} near={near} placeholder="Attraction or spot…" />
         <label>Date &amp; Time</label><input type="datetime-local" value={aTime} onChange={e => setATime(e.target.value)} />
         <button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addActivity}>Add Thing to Do</button>
       </div>
+
       <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}>
         <h4>Restaurant</h4>
-        <PlaceSearch label="Restaurant / Place" onPick={setRest} />
+        <PlaceSearch label="Restaurant / Place" onPick={setRest} near={near} placeholder="Restaurant name…" />
         <label>Date &amp; Time</label><input type="datetime-local" value={rTime} onChange={e => setRTime(e.target.value)} />
         <button className="btn-orange" style={{ width: '100%', marginTop: 10 }} onClick={addRestaurant}>Add Restaurant</button>
+      </div>
+
+      <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}>
+        <h4>Experiences</h4>
+        <p className="places-hint">Attractions near your destination — open TripAdvisor / Viator, or add with a date &amp; time.</p>
+        <label>Date &amp; Time</label>
+        <input type="datetime-local" value={expTime} onChange={e => setExpTime(e.target.value)} />
+        <div className="travel-link-row" style={{ margin: '8px 0' }}>
+          <a className="travel-chip" href={`https://www.tripadvisor.com/Search?q=${encodeURIComponent(trip.place || 'experiences')}`} target="_blank" rel="noreferrer">TripAdvisor</a>
+          <a className="travel-chip" href={`https://www.viator.com/searchResults/all?text=${encodeURIComponent(trip.place || '')}`} target="_blank" rel="noreferrer">Viator</a>
+          <a className="travel-chip" href={`https://www.getyourguide.com/s/?q=${encodeURIComponent(trip.place || '')}`} target="_blank" rel="noreferrer">GetYourGuide</a>
+          <a className="travel-chip" href={`https://www.lonelyplanet.com/search?q=${encodeURIComponent(trip.place || '')}`} target="_blank" rel="noreferrer">Lonely Planet</a>
+        </div>
+        {expPickStatus === 'loading' && <p className="places-hint">Loading experiences…</p>}
+        {expPickStatus === 'empty' && <p className="places-hint">No nearby experiences found — use the links above.</p>}
+        <div className="pick-list">
+          {expPicks.slice(0, 10).map(p => (
+            <div key={p.id} className="pick-row experience-pick">
+              <button type="button" className="pick-row-main" onClick={() => addExperienceFromList(p)}>
+                <span>{poiMeta(p.category).emoji} {p.name}</span>
+                <span className="pick-row-cat">{poiMeta(p.category).title}</span>
+              </button>
+              <button type="button" className="btn-orange btn-small" onClick={() => addExperienceFromList(p)}>Add</button>
+            </div>
+          ))}
+        </div>
       </div>
     </aside>
   )
@@ -783,7 +1081,7 @@ export default function TripPage() {
             return (
               <div key={poi.id} className="experience-card">
                 <div className="experience-card-top">
-                  <span className="experience-badge" style={{ background: meta.color }}>{meta.icon}</span>
+                  <span className="experience-badge" style={{ background: meta.color }}>{meta.emoji}</span>
                   <div style={{ minWidth: 0, flex: 1 }}>
                     <div className="experience-title">{poi.name}</div>
                     <div className="experience-cat">{meta.title}</div>
@@ -869,6 +1167,7 @@ export default function TripPage() {
               <MajorStopsInput value={trip.major_stops} onChange={stops => saveT({ ...trip, major_stops: stops })} />
             </div>
           </div>
+          {saveMsg && <p className="saved-toast trip-save-toast">{saveMsg}</p>}
           <MapView
             pins={pins}
             segments={segments}
@@ -876,6 +1175,7 @@ export default function TripPage() {
             enableNearbyPois
             showUserLocation
             placeContext={shortAddress(trip.place) || trip.place}
+            onSavePlace={persistSavePlace}
           />
         </div>
 
