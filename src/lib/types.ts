@@ -15,3 +15,26 @@ export interface ItineraryItem {
 }
 export const newId = () => (crypto?.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2) + Date.now())
 export const fmtDate = (d: string) => d ? new Date(d.length <= 10 ? d + 'T12:00:00' : d).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }) : ''
+export const bookingStatusLabel = (s: BookingStatus) =>
+  s === 'booked' ? 'Booked' : s === 'partially_booked' ? 'Partially Booked' : 'Not Booked'
+export const tripDurationDays = (start: string, end: string) => {
+  if (!start || !end) return null
+  const a = new Date(start + 'T12:00:00')
+  const b = new Date(end + 'T12:00:00')
+  if (Number.isNaN(+a) || Number.isNaN(+b) || b < a) return null
+  return Math.round((+b - +a) / 86400000) + 1
+}
+export const formatDateRange = (start: string, end: string) => {
+  if (!start && !end) return 'Dates TBD'
+  if (start && end && start === end) return fmtDate(start)
+  if (start && end) return `${fmtDate(start)} – ${fmtDate(end)}`
+  return fmtDate(start || end)
+}
+/** Satellite tile thumbnail from the same Esri imagery used on the map (only when coords exist). */
+export const destinationThumbUrl = (lat: number, lng: number, zoom = 11) => {
+  const n = 2 ** zoom
+  const x = Math.floor(((lng + 180) / 360) * n)
+  const latRad = (lat * Math.PI) / 180
+  const y = Math.floor((1 - Math.log(Math.tan(latRad) + 1 / Math.cos(latRad)) / Math.PI) / 2 * n)
+  return `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${zoom}/${y}/${x}`
+}

@@ -1,58 +1,391 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import TopBar from '../components/TopBar'
 import MapView from '../components/MapView'
 import MajorStopsInput from '../components/MajorStopsInput'
+import StatusBadge from '../components/StatusBadge'
+import DestinationThumb from '../components/DestinationThumb'
 import { useAuth } from '../context/AuthContext'
 import * as api from '../lib/data'
-import { searchPlaces } from '../lib/geocoding'
-import { newId, type Trip } from '../lib/types'
+import { searchPlaces, type GeoResult } from '../lib/geocoding'
+import {
+  bookingStatusLabel,
+  formatDateRange,
+  newId,
+  tripDurationDays,
+  type Trip,
+} from '../lib/types'
 
-function TripCard({ trip, onChange, onOpen, onDelete }: { trip: Trip; onChange: (t: Trip) => void; onOpen: () => void; onDelete: (t: Trip) => void }) {
-  const [placeQ, setPlaceQ] = useState(trip.place); const [results, setResults] = useState<any[]>([])
+type Mode = 'list' | 'create' | 'edit' | 'detail'
+
+function blankTrip(userId: string): Trip {
+  const today = new Date().toISOString().slice(0, 10)
+  return {
+    id: newId(),
+    user_id: userId,
+    name: 'New Trip',
+    place: '',
+    place_lat: null,
+    place_lng: null,
+    start_date: today,
+    end_date: today,
+    major_stops: [],
+    booking_status: 'not_booked',
+    created_at: new Date().toISOString(),
+  }
+}
+
+function TripForm({
+  trip,
+  onChange,
+  onSave,
+  onCancel,
+  saveLabel,
+  dateError,
+}: {
+  trip: Trip
+  onChange: (t: Trip) => void
+  onSave: () => void
+  onCancel: () => void
+  saveLabel: string
+  dateError: string | null
+}) {
+  const [placeQ, setPlaceQ] = useState(trip.place)
+  const [results, setResults] = useState<GeoResult[]>([])
   const upd = (p: Partial<Trip>) => onChange({ ...trip, ...p })
+
   return (
-    <div style={{ border: '1px solid var(--black)', borderRadius: 10, padding: 12, marginBottom: 12, background: '#fff' }}>
-      <div onClick={onOpen} style={{ cursor: 'pointer', color: 'var(--orange)', fontWeight: 800, fontSize: 16 }}>{trip.name || 'Untitled Trip'} →</div>
-      <label>Trip Name</label><input value={trip.name} onChange={e => upd({ name: e.target.value })} placeholder="Trip name" />
-      <label>Trip Place</label>
-      <input value={placeQ} onChange={async e => { setPlaceQ(e.target.value); upd({ place: e.target.value }); if (e.target.value.length > 2) setResults(await searchPlaces(e.target.value)) }} placeholder="Search a place…" />
-      {results.length > 0 && <div style={{ border: '1px solid #999', borderRadius: 6, maxHeight: 120, overflowY: 'auto' }}>{results.map((r, i) => <button key={i} style={{ display: 'block', width: '100%', textAlign: 'left', background: '#fff', border: 'none', padding: '7px 9px', fontSize: 12 }} onClick={() => { upd({ place: r.name, place_lat: r.lat, place_lng: r.lng }); setPlaceQ(r.name); setResults([]) }}>{r.display}</button>)}</div>}
-      <label>Start Date</label><input type="date" value={trip.start_date} onChange={e => upd({ start_date: e.target.value })} />
-      <label>End Date</label><input type="date" value={trip.end_date} onChange={e => upd({ end_date: e.target.value })} />
-      <label>Major Stops (comma separated)</label><MajorStopsInput value={trip.major_stops} onChange={stops => upd({ major_stops: stops })} />
-      <label>Booking Status</label>
-      <select value={trip.booking_status} onChange={e => upd({ booking_status: e.target.value as Trip['booking_status'] })}><option value="not_booked">Not Booked</option><option value="partially_booked">Partially Booked</option><option value="booked">Booked</option></select>
-      <button className="btn-orange" style={{ width: '100%', marginTop: 12 }} onClick={onOpen}>Open Trip</button>
-      <button className="btn-outline" style={{ width: '100%', marginTop: 8, color: '#c00', borderColor: '#c00' }} onClick={() => onDelete(trip)}>Delete Trip</button>
+    <div className="trip-form selected">
+      <h3 style={{ margin: '0 0 4px', fontSize: 16 }}>{saveLabel === 'Create Trip' ? 'Create Trip' : 'Edit Trip'}</h3>
+      <p style={{ margin: '0 0 8px', fontSize: 13, color: 'var(--text-secondary)' }}>Fill in the details below. Destination search uses OpenStreetMap.</p>
+
+      <label htmlFor={`trip-name-${trip.id}`}>Trip Name</label>
+      <input id={`trip-name-${trip.id}`} value={trip.name} onChange={e => upd({ name: e.target.value })} placeholder="Trip name" />
+
+      <label htmlFor={`trip-place-${trip.id}`}>Destination</label>
+      <input
+        id={`trip-place-${trip.id}`}
+        value={placeQ}
+        onChange={async e => {
+          const v = e.target.value
+          setPlaceQ(v)
+          upd({ place: v, place_lat: null, place_lng: null })
+          if (v.length > 2) setResults(await searchPlaces(v))
+          else setResults([])
+        }}
+        placeholder="Search a place…"
+        autoComplete="off"
+      />
+      {results.length > 0 && (
+        <div className="autocomplete" role="listbox">
+          {results.map((r, i) => (
+            <button
+              key={`${r.lat}-${r.lng}-${i}`}
+              type="button"
+              role="option"
+              onClick={() => {
+                upd({ place: r.name, place_lat: r.lat, place_lng: r.lng })
+                setPlaceQ(r.name)
+                setResults([])
+              }}
+            >
+              {r.display}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <label htmlFor={`trip-start-${trip.id}`}>Start Date</label>
+      <input id={`trip-start-${trip.id}`} type="date" value={trip.start_date} onChange={e => upd({ start_date: e.target.value })} />
+
+      <label htmlFor={`trip-end-${trip.id}`}>End Date</label>
+      <input id={`trip-end-${trip.id}`} type="date" value={trip.end_date} onChange={e => upd({ end_date: e.target.value })} />
+      {dateError && <p className="field-error" role="alert">{dateError}</p>}
+
+      <label htmlFor={`trip-stops-${trip.id}`}>Major Stops (comma separated)</label>
+      <MajorStopsInput value={trip.major_stops} onChange={stops => upd({ major_stops: stops })} />
+
+      <label htmlFor={`trip-status-${trip.id}`}>Booking Status</label>
+      <select
+        id={`trip-status-${trip.id}`}
+        value={trip.booking_status}
+        onChange={e => upd({ booking_status: e.target.value as Trip['booking_status'] })}
+      >
+        <option value="not_booked">Not Booked</option>
+        <option value="partially_booked">Partially Booked</option>
+        <option value="booked">Booked</option>
+      </select>
+
+      <div className="trip-actions">
+        <button type="button" className="btn-orange full" onClick={onSave} disabled={!!dateError}>{saveLabel}</button>
+        <button type="button" className="btn-secondary full" onClick={onCancel}>Cancel</button>
+      </div>
     </div>
   )
 }
+
+function TripDetail({
+  trip,
+  onOpen,
+  onEdit,
+  onDelete,
+}: {
+  trip: Trip
+  onOpen: () => void
+  onEdit: () => void
+  onDelete: () => void
+}) {
+  const duration = tripDurationDays(trip.start_date, trip.end_date)
+  const stops = trip.major_stops.map(s => s.name).filter(Boolean)
+
+  return (
+    <div className="trip-detail selected">
+      <div className="trip-detail-header">
+        <DestinationThumb place={trip.place} name={trip.name} lat={trip.place_lat} lng={trip.place_lng} size={64} className="trip-detail-thumb" />
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <h3>{trip.name || 'Untitled Trip'}</h3>
+          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 8 }}>
+            {trip.place || 'Destination not set'}
+          </div>
+          <StatusBadge status={trip.booking_status} />
+        </div>
+      </div>
+
+      <div className="trip-detail-row">
+        <span>Dates</span>
+        <span>{formatDateRange(trip.start_date, trip.end_date)}</span>
+      </div>
+      <div className="trip-detail-row">
+        <span>Duration</span>
+        <span>{duration ? `${duration} day${duration === 1 ? '' : 's'}` : '—'}</span>
+      </div>
+      <div className="trip-detail-row">
+        <span>Booking</span>
+        <span>{bookingStatusLabel(trip.booking_status)}</span>
+      </div>
+      {stops.length > 0 && (
+        <div className="trip-detail-row">
+          <span>Major stops</span>
+          <span>{stops.join(', ')}</span>
+        </div>
+      )}
+
+      <div className="trip-actions">
+        <button type="button" className="btn-orange full" onClick={onOpen}>Open Trip</button>
+        <button type="button" className="btn-secondary" onClick={onEdit}>Edit</button>
+        <button type="button" className="btn-danger" onClick={onDelete}>Delete</button>
+      </div>
+    </div>
+  )
+}
+
 export default function MainPage() {
-  const { profile } = useAuth(); const nav = useNavigate(); const [trips, setTrips] = useState<Trip[]>([])
-  useEffect(() => { if (profile) api.listTrips(profile.id).then(setTrips) }, [profile])
+  const { profile } = useAuth()
+  const nav = useNavigate()
+  const [trips, setTrips] = useState<Trip[]>([])
+  const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [mode, setMode] = useState<Mode>('list')
+  const [draft, setDraft] = useState<Trip | null>(null)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+
+  useEffect(() => {
+    if (profile) api.listTrips(profile.id).then(setTrips)
+  }, [profile])
+
+  const selected = useMemo(() => trips.find(t => t.id === selectedId) ?? null, [trips, selectedId])
+
+  const dateError = useMemo(() => {
+    if (!draft?.start_date || !draft?.end_date) return null
+    if (draft.end_date < draft.start_date) return 'End date must be on or after the start date.'
+    return null
+  }, [draft])
+
   if (!profile) return null
-  const create = async () => {
-    const t: Trip = { id: newId(), user_id: profile.id, name: 'New Trip', place: '', place_lat: null, place_lng: null, start_date: new Date().toISOString().slice(0, 10), end_date: new Date().toISOString().slice(0, 10), major_stops: [], booking_status: 'not_booked', created_at: new Date().toISOString() }
-    try { await api.saveTrip(t); setTrips(p => [...p, t]) } catch (x: any) { alert(`Could not create the trip: ${x.message}`) }
+
+  const selectTrip = (id: string) => {
+    setSelectedId(id)
+    setMode('detail')
+    setDraft(null)
+    setSidebarOpen(true)
   }
-  const change = async (t: Trip) => { setTrips(p => p.map(x => x.id === t.id ? t : x)); await api.saveTrip(t) }
+
+  const startCreate = () => {
+    const t = blankTrip(profile.id)
+    setDraft(t)
+    setSelectedId(null)
+    setMode('create')
+    setSidebarOpen(true)
+  }
+
+  const startEdit = (trip: Trip) => {
+    setDraft({ ...trip, major_stops: [...trip.major_stops] })
+    setSelectedId(trip.id)
+    setMode('edit')
+    setSidebarOpen(true)
+  }
+
+  const cancelForm = () => {
+    if (selectedId) setMode('detail')
+    else setMode('list')
+    setDraft(null)
+  }
+
+  const saveDraft = async () => {
+    if (!draft || dateError) return
+    try {
+      await api.saveTrip(draft)
+      setTrips(prev => {
+        const exists = prev.some(t => t.id === draft.id)
+        return exists ? prev.map(t => (t.id === draft.id ? draft : t)) : [...prev, draft]
+      })
+      setSelectedId(draft.id)
+      setMode('detail')
+      setDraft(null)
+    } catch (x: any) {
+      alert(`Could not save the trip: ${x.message}`)
+    }
+  }
+
   const deleteTrip = async (t: Trip) => {
     if (!window.confirm(`Delete "${t.name || 'Untitled Trip'}" and all of its itinerary items? This cannot be undone.`)) return
-    try { await api.deleteTrip(t.id); setTrips(p => p.filter(x => x.id !== t.id)) } catch (x: any) { alert(`Could not delete the trip: ${x.message}`) }
+    try {
+      await api.deleteTrip(t.id)
+      setTrips(prev => prev.filter(x => x.id !== t.id))
+      if (selectedId === t.id) {
+        setSelectedId(null)
+        setMode('list')
+        setDraft(null)
+      }
+    } catch (x: any) {
+      alert(`Could not delete the trip: ${x.message}`)
+    }
   }
-  const pins = trips.filter(t => t.place_lat != null).map(t => ({ id: t.id, lat: t.place_lat!, lng: t.place_lng!, label: `<b>${t.name}</b><br/>${t.place}` }))
+
+  const pins = trips
+    .filter(t => t.place_lat != null && t.place_lng != null)
+    .map(t => ({
+      id: t.id,
+      lat: t.place_lat!,
+      lng: t.place_lng!,
+      label: `<b>${t.name || 'Untitled Trip'}</b><br/>${t.place || 'No destination'}<br/>${formatDateRange(t.start_date, t.end_date)}<br/>${bookingStatusLabel(t.booking_status)}`,
+    }))
+
+  const sortedTrips = [...trips].sort((a, b) => a.start_date.localeCompare(b.start_date))
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh' }}>
+    <div className="app-shell">
       <TopBar />
-      <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
-        <aside className="panel" style={{ flex: '0 0 16.6%', minWidth: 220, borderRadius: 0, borderTop: 'none', borderLeft: 'none', borderBottom: 'none' }}>
-          <h2 style={{ marginTop: 4, fontFamily: "'Courier New',monospace" }}>Your Trips</h2>
-          {trips.length === 0 && <p style={{ fontSize: 13 }}>No trips yet. Create your first trip!</p>}
-          {trips.map(t => <TripCard key={t.id} trip={t} onChange={change} onOpen={() => nav(`/trip/${t.id}`)} onDelete={deleteTrip} />)}
+      <div className="app-body">
+        <button
+          type="button"
+          className={`sidebar-backdrop${sidebarOpen ? ' visible' : ''}`}
+          aria-label="Close trips panel"
+          onClick={() => setSidebarOpen(false)}
+        />
+
+        <aside className={`trips-sidebar${sidebarOpen ? ' open' : ''}`} aria-label="My Trips">
+          <div className="trips-sidebar-header">
+            <h2>My Trips</h2>
+            <button type="button" className="btn-orange btn-small" onClick={startCreate}>+ New</button>
+          </div>
+          <div className="trips-sidebar-body">
+            {(mode === 'create' || mode === 'edit') && draft && (
+              <TripForm
+                trip={draft}
+                onChange={setDraft}
+                onSave={saveDraft}
+                onCancel={cancelForm}
+                saveLabel={mode === 'create' ? 'Create Trip' : 'Save Changes'}
+                dateError={dateError}
+              />
+            )}
+
+            {mode === 'detail' && selected && (
+              <TripDetail
+                trip={selected}
+                onOpen={() => nav(`/trip/${selected.id}`)}
+                onEdit={() => startEdit(selected)}
+                onDelete={() => deleteTrip(selected)}
+              />
+            )}
+
+            {trips.length === 0 && mode === 'list' && (
+              <div className="empty-state">
+                <h3>No trips yet</h3>
+                <p>Create your first trip to pin a destination on the map and start planning.</p>
+                <button type="button" className="btn-orange" onClick={startCreate}>Create a Trip</button>
+              </div>
+            )}
+
+            {sortedTrips.length > 0 && (
+              <>
+                {(mode === 'detail' || mode === 'create' || mode === 'edit') && (
+                  <p style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-secondary)', margin: '4px 0 8px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                    All trips
+                  </p>
+                )}
+                {sortedTrips.map(t => {
+                  const duration = tripDurationDays(t.start_date, t.end_date)
+                  const isSelected = selectedId === t.id && mode !== 'create'
+                  return (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className={`trip-card${isSelected ? ' selected' : ''}`}
+                      onClick={() => selectTrip(t.id)}
+                      aria-pressed={isSelected}
+                    >
+                      <div className="trip-card-top">
+                        <DestinationThumb place={t.place} name={t.name} lat={t.place_lat} lng={t.place_lng} />
+                        <div className="trip-card-meta">
+                          <div className="trip-card-name">{t.name || 'Untitled Trip'}</div>
+                          <div className="trip-card-place">{t.place || 'No destination set'}</div>
+                          <div className="trip-card-dates">
+                            {formatDateRange(t.start_date, t.end_date)}
+                            {duration ? ` · ${duration}d` : ''}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="trip-card-footer">
+                        <StatusBadge status={t.booking_status} />
+                        <span style={{ fontSize: 12, color: 'var(--orange)', fontWeight: 600 }}>View</span>
+                      </div>
+                    </button>
+                  )
+                })}
+              </>
+            )}
+          </div>
         </aside>
-        <MapView pins={pins} onPinClick={id => nav(`/trip/${id}`)}>
-          <button className="btn-orange" onClick={create} style={{ position: 'absolute', top: 12, left: 54, zIndex: 500, boxShadow: '0 2px 8px rgba(0,0,0,.4)' }}>Create New Trip</button>
+
+        <MapView
+          pins={pins}
+          selectedId={selectedId}
+          onPinClick={id => selectTrip(id)}
+        >
+          <button
+            type="button"
+            className="sidebar-toggle"
+            aria-label={sidebarOpen ? 'Hide trips' : 'Show trips'}
+            aria-expanded={sidebarOpen}
+            onClick={() => setSidebarOpen(o => !o)}
+          >
+            {sidebarOpen ? '✕' : '☰'}
+          </button>
+
+          <button type="button" className="btn-orange map-create-btn" onClick={startCreate}>
+            Create New Trip
+          </button>
+
+          {trips.length === 0 && mode !== 'create' && (
+            <div className="map-empty-overlay">
+              <div className="map-empty-card">
+                <h3>Where to next?</h3>
+                <p>Explore the map and create a trip when you are ready.</p>
+                <button type="button" className="btn-orange" onClick={startCreate}>Create a Trip</button>
+              </div>
+            </div>
+          )}
         </MapView>
       </div>
     </div>
