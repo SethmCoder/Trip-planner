@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
-import { emojiForKind, fetchNearbyPois, type MapPoi } from '../lib/pois'
+import { buildPinPopup, emojiForKind, fetchNearbyPois, poiLabelWithDisplayName, type MapPoi } from '../lib/pois'
+import { translateLabel } from '../lib/translate'
 
 export interface SavePlacePayload {
   name: string
@@ -74,6 +75,7 @@ export default function MapView({
   enableNearbyPois = false,
   showUserLocation = false,
   placeContext = '',
+  displayLanguage = 'en',
   onPoisLoaded,
   onSavePlace,
   children,
@@ -86,6 +88,8 @@ export default function MapView({
   enableNearbyPois?: boolean
   showUserLocation?: boolean
   placeContext?: string
+  /** From Settings — translate pin / POI names in popups. */
+  displayLanguage?: string
   onPoisLoaded?: (pois: MapPoi[]) => void
   onSavePlace?: (place: SavePlacePayload) => void
   children?: React.ReactNode
@@ -107,13 +111,14 @@ export default function MapView({
   const onSavePlaceRef = useRef(onSavePlace)
   const selectedIdRef = useRef(selectedId)
   const placeContextRef = useRef(placeContext)
+  const displayLanguageRef = useRef(displayLanguage)
   const fittedKeyRef = useRef('')
   const [poisOn, setPoisOn] = useState(true)
   const [poiStatus, setPoiStatus] = useState<'idle' | 'loading' | 'ready' | 'zoom' | 'empty' | 'error'>('idle')
   const [poiCount, setPoiCount] = useState(0)
   const [locStatus, setLocStatus] = useState<'off' | 'pending' | 'on' | 'denied'>('off')
 
-  const pinsKey = pins.map(p => `${p.id}:${p.lat}:${p.lng}:${p.number ?? ''}:${p.kind ?? ''}:${p.savable ? 1 : 0}`).join('|')
+  const pinsKey = pins.map(p => `${p.id}:${p.lat}:${p.lng}:${p.number ?? ''}:${p.kind ?? ''}:${p.savable ? 1 : 0}:${p.name ?? ''}`).join('|')
   const segmentsKey = segments.map(s => `${s.id}:${s.fromLat},${s.fromLng}->${s.toLat},${s.toLng}:${s.path?.length ?? 0}`).join('|')
 
   useEffect(() => { onPinClickRef.current = onPinClick }, [onPinClick])
@@ -121,6 +126,7 @@ export default function MapView({
   useEffect(() => { onSavePlaceRef.current = onSavePlace }, [onSavePlace])
   useEffect(() => { selectedIdRef.current = selectedId }, [selectedId])
   useEffect(() => { placeContextRef.current = placeContext }, [placeContext])
+  useEffect(() => { displayLanguageRef.current = displayLanguage }, [displayLanguage])
 
   useEffect(() => {
     if (!el.current || mapRef.current) return
@@ -225,6 +231,7 @@ export default function MapView({
     const map = mapRef.current
     const layer = layerRef.current
     if (!map || !layer) return
+    let cancelled = false
     layer.clearLayers()
     markersRef.current = {}
     pinMetaRef.current = {}
@@ -249,37 +256,59 @@ export default function MapView({
       if (line.length > 1) arrowAt(line[Math.max(0, midIdx - 1)], line[midIdx]).addTo(layer)
     })
 
-    // Unwrap pins relative to the first pin so Pacific-spanning trips fit tightly
     const pinRefLng = pins[0]?.lng ?? 0
-    pins.forEach(p => {
-      const lng = unwrapLng(p.lng, pinRefLng)
-      pts.push([p.lat, lng])
-      const selected = selectedIdRef.current === p.id
-      const m = L.marker([p.lat, lng], {
-        icon: emojiPinIcon(p.kind, p.number, selected),
-        zIndexOffset: selected ? 800 : 200,
-      }).bindPopup(p.label, { maxWidth: 280, className: 'ttl-popup' })
-      m.on('click', () => onPinClickRef.current?.(p.id))
-      m.addTo(layer)
-      markersRef.current[p.id] = m
-      pinMetaRef.current[p.id] = { number: p.number, kind: p.kind, name: p.name, savable: p.savable, lat: p.lat, lng: p.lng }
-    })
+    const lang = displayLanguageRef.current || 'en'
 
-    if (showRoute && pins.length > 1) {
-      const routePts = unwrapPath(pins.map(p => L.latLng(p.lat, p.lng)))
-      L.polyline(routePts, { color: '#1F2937', weight: 2, dashArray: '6 6', opacity: 0.8 }).addTo(layer)
-      for (let i = 0; i < routePts.length - 1; i++) arrowAt(routePts[i], routePts[i + 1]).addTo(layer)
-    }
+    ;(async () => {
+      for (const p of pins) {
+        if (cancelled) return
+        const lng = unwrapLng(p.lng, pinRefLng)
+        pts.push([p.lat, lng])
+        const original = p.name || 'Place'
+        const display = await translateLabel(original, lang)
+        const label = p.name
+          ? buildPinPopup({
+              title: original,
+              displayTitle: display,
+              category: p.kind || 'other',
+              lat: p.lat,
+              lng: p.lng,
+              savable: p.savable,
+              pinId: p.id,
+            })
+          : p.label
+        if (cancelled) return
+        const selected = selectedIdRef.current === p.id
+        const m = L.marker([p.lat, lng], {
+          icon: emojiPinIcon(p.kind, p.number, selected),
+          zIndexOffset: selected ? 800 : 200,
+        }).bindPopup(label, { maxWidth: 280, className: 'ttl-popup' })
+        m.on('click', () => onPinClickRef.current?.(p.id))
+        m.addTo(layer)
+        markersRef.current[p.id] = m
+        pinMetaRef.current[p.id] = { number: p.number, kind: p.kind, name: p.name, savable: p.savable, lat: p.lat, lng: p.lng }
+      }
 
-    const fitKey = `${pinsKey}|${segmentsKey}`
-    if (pts.length > 0 && fittedKeyRef.current !== fitKey) {
-      fittedKeyRef.current = fitKey
-      map.invalidateSize({ animate: false })
-      if (pts.length === 1) map.setView(pts[0], Math.max(map.getZoom(), 13))
-      else map.fitBounds(L.latLngBounds(pts as L.LatLngExpression[]).pad(0.25), { maxZoom: 15 })
-    }
+      if (cancelled) return
+
+      if (showRoute && pins.length > 1) {
+        const routePts = unwrapPath(pins.map(p => L.latLng(p.lat, p.lng)))
+        L.polyline(routePts, { color: '#1F2937', weight: 2, dashArray: '6 6', opacity: 0.8 }).addTo(layer)
+        for (let i = 0; i < routePts.length - 1; i++) arrowAt(routePts[i], routePts[i + 1]).addTo(layer)
+      }
+
+      const fitKey = `${pinsKey}|${segmentsKey}`
+      if (pts.length > 0 && fittedKeyRef.current !== fitKey) {
+        fittedKeyRef.current = fitKey
+        map.invalidateSize({ animate: false })
+        if (pts.length === 1) map.setView(pts[0], Math.max(map.getZoom(), 13))
+        else map.fitBounds(L.latLngBounds(pts as L.LatLngExpression[]).pad(0.25), { maxZoom: 15 })
+      }
+    })()
+
+    return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pinsKey, segmentsKey, showRoute])
+  }, [pinsKey, segmentsKey, showRoute, displayLanguage])
 
   useEffect(() => {
     const map = mapRef.current
@@ -340,21 +369,30 @@ export default function MapView({
         signal: controller.signal,
         placeContext: placeContextRef.current,
         zoom,
-      }).then(pois => {
+      }).then(async pois => {
+        if (aborted) return
+        const lang = displayLanguageRef.current || 'en'
+        const ctx = placeContextRef.current
+        const localized = await Promise.all(pois.map(async p => {
+          const display = await translateLabel(p.name, lang)
+          return {
+            ...p,
+            label: poiLabelWithDisplayName(p, display, ctx),
+          }
+        }))
         if (aborted) return
         clearPois()
         poiCacheRef.current = {}
-        // Already sorted by popularity; higher score → higher z-index
-        pois.forEach((p, i) => {
+        localized.forEach((p, i) => {
           poiCacheRef.current[p.id] = p
           L.marker([p.lat, p.lng], {
             icon: emojiPinIcon(p.category, undefined, false),
             zIndexOffset: 50 + Math.max(0, 40 - i),
           }).bindPopup(p.label, { maxWidth: 280, className: 'ttl-popup' }).addTo(poiLayer)
         })
-        setPoiCount(pois.length)
-        setPoiStatus(pois.length ? 'ready' : 'empty')
-        onPoisLoadedRef.current?.(pois)
+        setPoiCount(localized.length)
+        setPoiStatus(localized.length ? 'ready' : 'empty')
+        onPoisLoadedRef.current?.(localized)
       }).catch(err => {
         if (aborted || err?.name === 'AbortError') return
         setPoiStatus('error')
@@ -380,7 +418,7 @@ export default function MapView({
       map.off('zoomend', schedule)
       clearPois()
     }
-  }, [enableNearbyPois, poisOn])
+  }, [enableNearbyPois, poisOn, displayLanguage])
 
   const stopWatching = () => {
     if (watchIdRef.current != null && navigator.geolocation) {

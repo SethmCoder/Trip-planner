@@ -5,6 +5,7 @@ import { useAuth } from '../context/AuthContext'
 import * as api from '../lib/data'
 import { searchPlaces, type GeoResult } from '../lib/geocoding'
 import { placePrimary, placeSecondary, shortAddress } from '../lib/formatPlace'
+import TranslatedText from '../components/TranslatedText'
 import { emojiForKind, poiMeta } from '../lib/pois'
 import { googleMapsUrl } from '../lib/maps'
 import { newId, type SavedPlace } from '../lib/types'
@@ -149,7 +150,7 @@ export default function SavedPlacesPage() {
                 >
                   <span className="saved-card-emoji" aria-hidden>{emojiForKind(p.category)}</span>
                   <span className="saved-card-main">
-                    <span className="saved-card-name">{p.name}</span>
+                    <TranslatedText text={p.name} className="saved-card-name" />
                     <span className="saved-card-meta">{meta.title} · {shortAddress(p.place_name)}</span>
                     <span className="saved-card-links">
                       <a
@@ -181,6 +182,7 @@ export default function SavedPlacesPage() {
           onPinClick={id => setSelectedId(id)}
           showUserLocation
           enableNearbyPois
+          displayLanguage={profile.preferred_language || 'en'}
           onSavePlace={persist}
         />
       </div>

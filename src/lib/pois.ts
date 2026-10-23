@@ -270,16 +270,24 @@ function escapeAttr(s: string) {
   return escapeHtml(s).replace(/'/g, '&#39;')
 }
 
-function popupHtml(name: string, category: PoiCategory, lat: number, lng: number, placeContext: string, opts?: { savable?: boolean; pinId?: string }) {
+function popupHtml(
+  name: string,
+  category: PoiCategory,
+  lat: number,
+  lng: number,
+  placeContext: string,
+  opts?: { savable?: boolean; pinId?: string; /** Original name for save / search (when title is translated). */ saveName?: string },
+) {
   const meta = poiMeta(category)
-  const maps = googleMapsUrl({ lat, lng, name })
-  const links = poiTravelLinks(name, placeContext, category)
+  const saveName = opts?.saveName || name
+  const maps = googleMapsUrl({ lat, lng, name: saveName })
+  const links = poiTravelLinks(saveName, placeContext, category)
     .slice(0, 2)
     .map(l => `<a href="${l.url}" target="_blank" rel="noreferrer">${l.label}</a>`)
     .join(' · ')
   const saveAttrs = opts?.pinId
     ? `data-save-pin="${escapeAttr(opts.pinId)}"`
-    : `data-save-lat="${lat}" data-save-lng="${lng}" data-save-name="${escapeAttr(name)}" data-save-category="${category}"`
+    : `data-save-lat="${lat}" data-save-lng="${lng}" data-save-name="${escapeAttr(saveName)}" data-save-category="${category}"`
   const saveBtn = opts?.savable !== false
     ? `<button type="button" class="map-popup-btn map-save-btn" ${saveAttrs}>Add to saved list</button>`
     : ''
@@ -294,6 +302,18 @@ function popupHtml(name: string, category: PoiCategory, lat: number, lng: number
     `</div>`,
     `</div>`,
   ].join('')
+}
+
+/** Rebuild a POI popup with a translated display name (keeps original name for saves/links). */
+export function poiLabelWithDisplayName(
+  poi: MapPoi,
+  displayName: string,
+  placeContext = '',
+): string {
+  return popupHtml(displayName, poi.category, poi.lat, poi.lng, placeContext, {
+    pinId: poi.id,
+    saveName: poi.name,
+  })
 }
 
 function parseElements(elements: any[], placeContext: string, limit = 40): MapPoi[] {
@@ -419,6 +439,8 @@ export async function fetchExperiences(
 export function buildPinPopup(opts: {
   title?: string
   name?: string
+  /** Shown in the popup title when different from the saved/original name. */
+  displayTitle?: string
   category?: string
   place?: string
   detail?: string
@@ -428,6 +450,7 @@ export function buildPinPopup(opts: {
   pinId?: string
 }) {
   const name = opts.title || opts.name || 'Place'
+  const display = opts.displayTitle || name
   const detail = opts.place || opts.detail
   const category = (opts.category || 'other') as PoiCategory
   const meta = poiMeta(category)
@@ -440,7 +463,7 @@ export function buildPinPopup(opts: {
     : ''
   return [
     `<div class="map-popup">`,
-    `<div class="map-popup-title">${meta.emoji} <b>${escapeHtml(name)}</b></div>`,
+    `<div class="map-popup-title">${meta.emoji} <b>${escapeHtml(display)}</b></div>`,
     `<div class="map-popup-cat">${meta.title}${detail ? ` · ${escapeHtml(detail)}` : ''}</div>`,
     `<div class="map-popup-actions">`,
     `<a class="map-popup-link" href="${maps}" target="_blank" rel="noreferrer">Open in Google Maps</a>`,

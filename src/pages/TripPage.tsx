@@ -178,6 +178,8 @@ export default function TripPage() {
   const [expPicks, setExpPicks] = useState<MapPoi[]>([])
   const [expPickStatus, setExpPickStatus] = useState<'idle' | 'loading' | 'ready' | 'empty'>('idle')
   const [expTime, setExpTime] = useState('')
+  const [expFilter, setExpFilter] = useState('')
+  const [expSelected, setExpSelected] = useState<GeoResult | null>(null)
   const [act, setAct] = useState<GeoResult | null>(null)
   const [aTime, setATime] = useState('')
   const [rest, setRest] = useState<GeoResult | null>(null)
@@ -420,6 +422,15 @@ export default function TripPage() {
     return out.sort((a, b) => a.km - b.km).slice(0, 6)
   }, [items, savedPlaces, dismissedSuggestions])
 
+  const filteredExpPicks = useMemo(() => {
+    const q = expFilter.trim().toLowerCase()
+    if (!q) return expPicks
+    return expPicks.filter(p =>
+      p.name.toLowerCase().includes(q) ||
+      poiMeta(p.category).title.toLowerCase().includes(q),
+    )
+  }, [expPicks, expFilter])
+
   if (!profile) return null
   if (!trip) {
     return (
@@ -527,6 +538,25 @@ export default function TripPage() {
       image_url: '',
     }])
   }
+
+  const addExperienceFromSearch = async () => {
+    if (!expSelected) return alert('Search and pick an experience first')
+    await addItems([{
+      ...baseItem(trip, profile.id, items.length),
+      type: 'activity',
+      title: expSelected.name,
+      place_name: shortAddress(expSelected.display, 2) || expSelected.name,
+      lat: expSelected.lat,
+      lng: expSelected.lng,
+      start_at: expTime || `${trip.start_date}T11:00`,
+      end_at: expTime || `${trip.start_date}T11:00`,
+      image_url: '',
+    }])
+    setExpSelected(null)
+    setExpFilter('')
+  }
+
+  const expSearchTerm = expFilter.trim() || expSelected?.name || trip.place || 'experiences'
 
   const addActivity = () => {
     if (!act) return alert('Pick a place to visit')
@@ -1038,22 +1068,57 @@ export default function TripPage() {
 
       <div style={{ borderTop: '2px solid var(--orange)', paddingTop: 6, marginTop: 14 }}>
         <h4>Experiences</h4>
-        <p className="places-hint">Attractions near your destination — open TripAdvisor / Viator, or add with a date &amp; time.</p>
+        <p className="places-hint">Search an attraction, or pick from nearby results. Set a date &amp; time, then add.</p>
+        <PlaceSearch
+          label="Search experiences"
+          near={near}
+          placeholder="Museum, tour, shrine…"
+          onPick={r => {
+            setExpSelected(r)
+            setExpFilter(r.name)
+          }}
+        />
+        <label htmlFor="exp-filter">Filter nearby list</label>
+        <input
+          id="exp-filter"
+          value={expFilter}
+          onChange={e => {
+            setExpFilter(e.target.value)
+            if (expSelected && e.target.value !== expSelected.name) setExpSelected(null)
+          }}
+          placeholder="Type to filter nearby experiences…"
+          autoComplete="off"
+        />
+        {expSelected && (
+          <p className="places-hint">Selected: <b>{expSelected.name}</b></p>
+        )}
         <label>Date &amp; Time</label>
         <input type="datetime-local" value={expTime} onChange={e => setExpTime(e.target.value)} />
+        <button
+          type="button"
+          className="btn-orange"
+          style={{ width: '100%', marginTop: 10 }}
+          onClick={addExperienceFromSearch}
+          disabled={!expSelected}
+        >
+          Add Searched Experience
+        </button>
         <div className="travel-link-row" style={{ margin: '8px 0' }}>
-          <a className="travel-chip" href={`https://www.tripadvisor.com/Search?q=${encodeURIComponent(trip.place || 'experiences')}`} target="_blank" rel="noreferrer">TripAdvisor</a>
-          <a className="travel-chip" href={`https://www.viator.com/searchResults/all?text=${encodeURIComponent(trip.place || '')}`} target="_blank" rel="noreferrer">Viator</a>
-          <a className="travel-chip" href={`https://www.getyourguide.com/s/?q=${encodeURIComponent(trip.place || '')}`} target="_blank" rel="noreferrer">GetYourGuide</a>
-          <a className="travel-chip" href={`https://www.lonelyplanet.com/search?q=${encodeURIComponent(trip.place || '')}`} target="_blank" rel="noreferrer">Lonely Planet</a>
+          <a className="travel-chip" href={`https://www.tripadvisor.com/Search?q=${encodeURIComponent(expSearchTerm)}`} target="_blank" rel="noreferrer">TripAdvisor</a>
+          <a className="travel-chip" href={`https://www.viator.com/searchResults/all?text=${encodeURIComponent(expSearchTerm)}`} target="_blank" rel="noreferrer">Viator</a>
+          <a className="travel-chip" href={`https://www.getyourguide.com/s/?q=${encodeURIComponent(expSearchTerm)}`} target="_blank" rel="noreferrer">GetYourGuide</a>
+          <a className="travel-chip" href={`https://www.lonelyplanet.com/search?q=${encodeURIComponent(expSearchTerm)}`} target="_blank" rel="noreferrer">Lonely Planet</a>
         </div>
         {expPickStatus === 'loading' && <p className="places-hint">Loading experiences…</p>}
-        {expPickStatus === 'empty' && <p className="places-hint">No nearby experiences found — use the links above.</p>}
+        {expPickStatus === 'empty' && <p className="places-hint">No nearby experiences found — search above or use the links.</p>}
+        {expPickStatus === 'ready' && filteredExpPicks.length === 0 && expFilter.trim() && (
+          <p className="places-hint">No nearby matches for “{expFilter}” — try Search experiences above.</p>
+        )}
         <div className="pick-list">
-          {expPicks.slice(0, 10).map(p => (
+          {filteredExpPicks.slice(0, 10).map(p => (
             <div key={p.id} className="pick-row experience-pick">
               <button type="button" className="pick-row-main" onClick={() => addExperienceFromList(p)}>
-                <span>{poiMeta(p.category).emoji} {p.name}</span>
+                <span>{poiMeta(p.category).emoji} <TranslatedText text={p.name} /></span>
                 <span className="pick-row-cat">{poiMeta(p.category).title}</span>
               </button>
               <button type="button" className="btn-orange btn-small" onClick={() => addExperienceFromList(p)}>Add</button>
@@ -1244,7 +1309,7 @@ export default function TripPage() {
                 <div className="experience-card-top">
                   <span className="experience-badge" style={{ background: meta.color }}>{meta.emoji}</span>
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    <div className="experience-title">{poi.name}</div>
+                    <TranslatedText text={poi.name} as="div" className="experience-title" />
                     <div className="experience-cat">{meta.title}</div>
                   </div>
                 </div>
@@ -1336,6 +1401,7 @@ export default function TripPage() {
             enableNearbyPois
             showUserLocation
             placeContext={shortAddress(trip.place) || trip.place}
+            displayLanguage={profile.preferred_language || 'en'}
             onSavePlace={persistSavePlace}
           />
         </div>

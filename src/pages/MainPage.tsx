@@ -423,6 +423,7 @@ export default function MainPage() {
           onPinClick={id => selectTrip(id)}
           showUserLocation
           enableNearbyPois
+          displayLanguage={profile?.preferred_language || 'en'}
         >
           <button
             type="button"
