@@ -324,7 +324,8 @@ export default function MapView({
         return
       }
       const b = map.getBounds()
-      if (Math.abs(b.getEast() - b.getWest()) > 4 || Math.abs(b.getNorth() - b.getSouth()) > 4) {
+      // Keep requests small — wide views are slow and noisy
+      if (Math.abs(b.getEast() - b.getWest()) > 2.5 || Math.abs(b.getNorth() - b.getSouth()) > 2.5) {
         clearPois()
         setPoiStatus('zoom')
         setPoiCount(0)
@@ -335,15 +336,20 @@ export default function MapView({
       setPoiStatus('loading')
       fetchNearbyPois({
         south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast(),
-      }, { signal: controller.signal, placeContext: placeContextRef.current }).then(pois => {
+      }, {
+        signal: controller.signal,
+        placeContext: placeContextRef.current,
+        zoom,
+      }).then(pois => {
         if (aborted) return
         clearPois()
         poiCacheRef.current = {}
-        pois.forEach(p => {
+        // Already sorted by popularity; higher score → higher z-index
+        pois.forEach((p, i) => {
           poiCacheRef.current[p.id] = p
           L.marker([p.lat, p.lng], {
             icon: emojiPinIcon(p.category, undefined, false),
-            zIndexOffset: 50,
+            zIndexOffset: 50 + Math.max(0, 40 - i),
           }).bindPopup(p.label, { maxWidth: 280, className: 'ttl-popup' }).addTo(poiLayer)
         })
         setPoiCount(pois.length)
@@ -358,7 +364,8 @@ export default function MapView({
 
     const schedule = () => {
       window.clearTimeout(timer)
-      timer = window.setTimeout(load, 350)
+      // Slightly longer debounce so pans don't spam Overpass
+      timer = window.setTimeout(load, 480)
     }
 
     map.on('moveend', schedule)
@@ -449,7 +456,7 @@ export default function MapView({
             </button>
             {poisOn && poiStatus === 'zoom' && <span className="map-poi-hint">Zoom in closer to load map pins</span>}
             {poisOn && poiStatus === 'loading' && <span className="map-poi-hint">Loading places…</span>}
-            {poisOn && poiStatus === 'ready' && <span className="map-poi-hint">{poiCount} places nearby</span>}
+            {poisOn && poiStatus === 'ready' && <span className="map-poi-hint">{poiCount} popular places</span>}
             {poisOn && poiStatus === 'empty' && <span className="map-poi-hint">No places found here — try another area</span>}
             {poisOn && poiStatus === 'error' && <span className="map-poi-hint">Couldn’t load places — try again in a moment</span>}
           </>

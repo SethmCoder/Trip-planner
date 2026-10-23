@@ -20,13 +20,24 @@ function load(): DB {
   const d = seed(); save(d); return d
 }
 function save(d: DB) { localStorage.setItem(KEY, JSON.stringify(d)) }
-const strip = (u: LocalUser): Profile => ({ id: u.id, username: u.username, email: u.email, avatar_url: u.avatar_url })
+export function normalizeProfile(p: Profile | null | undefined): Profile | null {
+  if (!p) return null
+  return {
+    id: p.id,
+    username: p.username,
+    email: p.email,
+    avatar_url: p.avatar_url ?? null,
+    booking_alerts_enabled: p.booking_alerts_enabled !== false,
+    preferred_language: p.preferred_language || 'en',
+  }
+}
+const strip = (u: LocalUser): Profile => normalizeProfile(u)!
 
 // ---------- Auth ----------
 export async function getSessionProfile(): Promise<Profile | null> {
   if (isSupabaseConfigured && supabase) {
     const { data } = await supabase.auth.getSession(); if (!data.session) return null
-    const { data: p } = await supabase.from('profiles').select('*').eq('id', data.session.user.id).single(); return p ?? null
+    const { data: p } = await supabase.from('profiles').select('*').eq('id', data.session.user.id).single(); return normalizeProfile(p)
   }
   const d = load(); const u = d.users.find(x => x.id === d.sessionUserId); return u ? strip(u) : null
 }
@@ -35,7 +46,7 @@ export async function login(identifier: string, password: string): Promise<Profi
     let email = identifier.trim()
     if (!email.includes('@')) { const { data } = await supabase.from('profiles').select('email').eq('username', email).single(); if (!data) throw new Error('User not found'); email = data.email }
     const { data, error } = await supabase.auth.signInWithPassword({ email, password }); if (error) throw new Error(error.message)
-    const { data: p } = await supabase.from('profiles').select('*').eq('id', data.user.id).single(); return p
+    const { data: p } = await supabase.from('profiles').select('*').eq('id', data.user.id).single(); return normalizeProfile(p)!
   }
   const d = load(); const u = d.users.find(x => x.username.toLowerCase() === identifier.trim().toLowerCase() || x.email.toLowerCase() === identifier.trim().toLowerCase())
   if (!u || u.password !== password) throw new Error('Invalid username/email or password')
@@ -46,13 +57,21 @@ export async function createAccount(email: string, username: string, password: s
   if (isSupabaseConfigured && supabase) {
     const { data, error } = await supabase.auth.signUp({ email, password }); if (error) throw new Error(error.message)
     if (!data.user) throw new Error('Account created — please confirm your email, then log in.')
-    const { error: e2 } = await supabase.from('profiles').upsert({ id: data.user.id, email, username, avatar_url: null }); if (e2) throw new Error(e2.message)
-    return { id: data.user.id, email, username, avatar_url: null }
+    const row = { id: data.user.id, email, username, avatar_url: null, booking_alerts_enabled: true, preferred_language: 'en' }
+    const { error: e2 } = await supabase.from('profiles').upsert(row)
+    if (e2) {
+      if (/booking_alerts|preferred_language/i.test(e2.message)) {
+        const { error: e3 } = await supabase.from('profiles').upsert({ id: data.user.id, email, username, avatar_url: null })
+        if (e3) throw new Error(e3.message)
+      } else throw new Error(e2.message)
+    }
+    return normalizeProfile(row)!
   }
   const d = load()
   if (d.users.some(x => x.username.toLowerCase() === username.toLowerCase())) throw new Error('Username already taken')
   if (d.users.some(x => x.email.toLowerCase() === email.toLowerCase())) throw new Error('Email already registered')
-  const u: LocalUser = { id: newId(), username, email, password, avatar_url: null }; d.users.push(u); d.sessionUserId = u.id; save(d); return strip(u)
+  const u: LocalUser = { id: newId(), username, email, password, avatar_url: null, booking_alerts_enabled: true, preferred_language: 'en' }
+  d.users.push(u); d.sessionUserId = u.id; save(d); return strip(u)
 }
 export async function requestPasswordReset(identifier: string): Promise<void> {
   const value = identifier.trim()
@@ -100,12 +119,35 @@ export async function updateProfile(profile: Profile, patch: Partial<Profile> & 
   if (isSupabaseConfigured && supabase) {
     if (patch.newPassword) await supabase.auth.updateUser({ password: patch.newPassword })
     if (patch.email && patch.email !== profile.email) await supabase.auth.updateUser({ email: patch.email })
-    const { data, error } = await supabase.from('profiles').update({ username: patch.username ?? profile.username, email: patch.email ?? profile.email, avatar_url: patch.avatar_url !== undefined ? patch.avatar_url : profile.avatar_url }).eq('id', profile.id).select().single()
-    if (error) throw new Error(error.message); return data
+    const full = {
+      username: patch.username ?? profile.username,
+      email: patch.email ?? profile.email,
+      avatar_url: patch.avatar_url !== undefined ? patch.avatar_url : profile.avatar_url,
+      booking_alerts_enabled: patch.booking_alerts_enabled !== undefined ? patch.booking_alerts_enabled : profile.booking_alerts_enabled !== false,
+      preferred_language: patch.preferred_language ?? profile.preferred_language ?? 'en',
+    }
+    const { data, error } = await supabase.from('profiles').update(full).eq('id', profile.id).select().single()
+    if (error) {
+      if (/booking_alerts|preferred_language/i.test(error.message)) {
+        const { booking_alerts_enabled, preferred_language, ...rest } = full
+        const retry = await supabase.from('profiles').update(rest).eq('id', profile.id).select().single()
+        if (retry.error) throw new Error(retry.error.message)
+        console.warn('Profile prefs columns missing — run the latest supabase/schema.sql')
+        return normalizeProfile({ ...retry.data, booking_alerts_enabled, preferred_language })!
+      }
+      throw new Error(error.message)
+    }
+    return normalizeProfile(data)!
   }
   const d = load(); const u = d.users.find(x => x.id === profile.id); if (!u) throw new Error('User not found')
   if (patch.username && d.users.some(x => x.id !== u.id && x.username.toLowerCase() === patch.username!.toLowerCase())) throw new Error('Username already taken')
-  Object.assign(u, { username: patch.username ?? u.username, email: patch.email ?? u.email, avatar_url: patch.avatar_url !== undefined ? patch.avatar_url : u.avatar_url })
+  Object.assign(u, {
+    username: patch.username ?? u.username,
+    email: patch.email ?? u.email,
+    avatar_url: patch.avatar_url !== undefined ? patch.avatar_url : u.avatar_url,
+    booking_alerts_enabled: patch.booking_alerts_enabled !== undefined ? patch.booking_alerts_enabled : u.booking_alerts_enabled !== false,
+    preferred_language: patch.preferred_language ?? u.preferred_language ?? 'en',
+  })
   if (patch.newPassword) u.password = patch.newPassword
   save(d); return strip(u)
 }

@@ -10,12 +10,13 @@ import * as api from '../lib/data'
 import { searchPlaces, type GeoResult } from '../lib/geocoding'
 import { bookingLink, discoveryLinks } from '../lib/bookingLinks'
 import { newId, fmtDate, type Trip, type ItineraryItem, type SavedPlace } from '../lib/types'
-import { calculateTransitMinutes, formatTransitTime, isFlight, addMinutes, getQuickestRoute, estimateGapTravel, formatCompactDuration, type LatLng, type GapTravel } from '../lib/routing'
-import { buildPinPopup, categoryFromItemType, fetchExperiences, fetchHotelsNearby, poiMeta, type MapPoi } from '../lib/pois'
+import { calculateTransitMinutes, formatTransitTime, isFlight, addMinutes, getQuickestRoute, estimateGapTravel, formatCompactDuration, haversineKm, type LatLng, type GapTravel } from '../lib/routing'
+import { buildPinPopup, categoryFromItemType, emojiForKind, fetchExperiences, fetchHotelsNearby, poiMeta, type MapPoi } from '../lib/pois'
 import { resolvePlaceImage, resolveTripImage } from '../lib/tripImages'
 import { destinationTravelLinks, poiTravelLinks } from '../lib/travelApps'
 import { shortAddress, placePrimary, placeSecondary, hotelStayTitle, hotelPhase } from '../lib/formatPlace'
 import DestinationThumb from '../components/DestinationThumb'
+import TranslatedText from '../components/TranslatedText'
 
 const STAY_COLORS = ['#2563EB', '#7C3AED', '#0891B2', '#DB2777', '#059669', '#D97706']
 
@@ -187,6 +188,7 @@ export default function TripPage() {
   const [expStatus, setExpStatus] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'need-place'>('idle')
   const [savedPlaces, setSavedPlaces] = useState<SavedPlace[]>([])
   const [saveMsg, setSaveMsg] = useState('')
+  const [dismissedSuggestions, setDismissedSuggestions] = useState<string[]>([])
 
   useEffect(() => {
     if (id) {
@@ -353,6 +355,70 @@ export default function TripPage() {
     })()
     return () => { cancelled = true }
   }, [dayRouteSignature, selectedDay, items])
+
+  /** Saved places near booked flights/hotels that are not already on this trip. */
+  const savedPlaceSuggestions = useMemo(() => {
+    type Anchor = { lat: number; lng: number; label: string; when: string }
+    const anchors: Anchor[] = []
+    for (const it of items) {
+      const booked = it.booking_status === 'booked' || it.booking_status === 'partially_booked'
+      if (!booked) continue
+      if (it.type === 'hotel' && it.lat != null && it.lng != null) {
+        anchors.push({
+          lat: it.lat,
+          lng: it.lng,
+          label: `booked stay · ${hotelStayTitle(it.title) || it.place_name || 'Hotel'}`,
+          when: it.start_at,
+        })
+      }
+      if (it.type === 'transit' && isFlight(it.mode_of_transport)) {
+        if (it.to_lat != null && it.to_lng != null) {
+          anchors.push({
+            lat: it.to_lat,
+            lng: it.to_lng,
+            label: `flight arrival · ${placePrimary(it.to_name) || 'destination'}`,
+            when: it.end_at || it.start_at,
+          })
+        }
+        if (it.from_lat != null && it.from_lng != null) {
+          anchors.push({
+            lat: it.from_lat,
+            lng: it.from_lng,
+            label: `flight departure · ${placePrimary(it.from_name) || 'origin'}`,
+            when: it.start_at,
+          })
+        }
+      }
+    }
+    if (anchors.length === 0 || savedPlaces.length === 0) return []
+
+    const onTrip = (place: SavedPlace) => items.some(it => {
+      if (it.lat == null || it.lng == null) return false
+      if (haversineKm({ lat: it.lat, lng: it.lng }, { lat: place.lat, lng: place.lng }) < 0.35) return true
+      const a = (it.title || '').toLowerCase()
+      const b = (place.name || '').toLowerCase()
+      return !!b && (a.includes(b) || b.includes(hotelStayTitle(it.title).toLowerCase()))
+    })
+
+    const NEAR_KM = 35
+    const out: { place: SavedPlace; reason: string; when: string; km: number }[] = []
+    const seen = new Set<string>()
+
+    for (const place of savedPlaces) {
+      if (dismissedSuggestions.includes(place.id) || seen.has(place.id) || onTrip(place)) continue
+      let best: { reason: string; when: string; km: number } | null = null
+      for (const anchor of anchors) {
+        const km = haversineKm({ lat: place.lat, lng: place.lng }, { lat: anchor.lat, lng: anchor.lng })
+        if (km > NEAR_KM) continue
+        if (!best || km < best.km) best = { reason: `Near your ${anchor.label}`, when: anchor.when, km }
+      }
+      if (!best) continue
+      seen.add(place.id)
+      out.push({ place, ...best })
+    }
+
+    return out.sort((a, b) => a.km - b.km).slice(0, 6)
+  }, [items, savedPlaces, dismissedSuggestions])
 
   if (!profile) return null
   if (!trip) {
@@ -656,6 +722,63 @@ export default function TripPage() {
     })
   }
 
+  const addSuggestedSavedPlace = async (place: SavedPlace, when: string) => {
+    const cat = (place.category || 'other').toLowerCase()
+    const type: ItineraryItem['type'] =
+      cat === 'restaurant' || cat === 'cafe' ? 'restaurant'
+        : cat === 'hotel' ? 'hotel'
+          : 'activity'
+    const start = when || aTime || `${trip.start_date}T11:00`
+    if (type === 'hotel') {
+      const gid = newId()
+      const endDay = trip.end_date || trip.start_date
+      await addItems([
+        {
+          ...baseItem(trip, profile.id, items.length),
+          type: 'hotel',
+          group_id: gid,
+          subtype: 'checkin',
+          title: `${place.name} (Check-in)`,
+          place_name: place.place_name || place.name,
+          lat: place.lat,
+          lng: place.lng,
+          start_at: start,
+          end_at: start,
+          image_url: '',
+        },
+        {
+          ...baseItem(trip, profile.id, items.length + 1),
+          type: 'hotel',
+          group_id: gid,
+          subtype: 'checkout',
+          title: `${place.name} (Check-out)`,
+          place_name: place.place_name || place.name,
+          lat: place.lat,
+          lng: place.lng,
+          start_at: `${endDay}T11:00`,
+          end_at: `${endDay}T11:00`,
+          image_url: '',
+        },
+      ])
+    } else {
+      await addItems([{
+        ...baseItem(trip, profile.id, items.length),
+        type,
+        title: place.name,
+        place_name: place.place_name || place.name,
+        lat: place.lat,
+        lng: place.lng,
+        start_at: start,
+        end_at: start,
+        image_url: '',
+      }])
+    }
+    setDismissedSuggestions(prev => prev.includes(place.id) ? prev : [...prev, place.id])
+    setRightTab('places')
+    setSaveMsg(`Added “${place.name}” to this trip`)
+    window.setTimeout(() => setSaveMsg(''), 2500)
+  }
+
   const card = (it: ItineraryItem) => {
     const link = bookingLink(it)
     const extra = discoveryLinks(it)
@@ -685,7 +808,7 @@ export default function TripPage() {
         <div className="place-card-summary" onClick={toggle} title={isOpen ? 'Click to collapse' : 'Click to expand'}>
           <ItemThumb it={it} onResolved={url => persistThumb(it, url)} />
           <div className="place-card-main">
-            <span className="place-card-place">{addressLine}</span>
+            <TranslatedText text={addressLine} className="place-card-place" />
             <span className="place-card-time">
               {dateLine}{timeLine ? ` · ${timeLine}` : ''}
             </span>
@@ -969,6 +1092,44 @@ export default function TripPage() {
             Drag to reorder. Click a day to show that day’s route on the map
             {selectedDay ? <> · Viewing <b>{fmtDate(selectedDay)}</b></> : null}.
           </p>
+
+          {savedPlaceSuggestions.length > 0 && (
+            <div className="saved-suggest" role="region" aria-label="Saved place suggestions">
+              <div className="saved-suggest-header">
+                <h4>Suggested from Saved Places</h4>
+                <p>Near your booked flights or hotels — not on this trip yet.</p>
+              </div>
+              {savedPlaceSuggestions.map(s => (
+                <div key={s.place.id} className="saved-suggest-row">
+                  <div className="saved-suggest-main">
+                    <span className="saved-suggest-name">
+                      {emojiForKind(s.place.category)} {s.place.name}
+                    </span>
+                    <span className="saved-suggest-meta">
+                      {s.reason}
+                      {s.km < 1 ? ' · under 1 km' : ` · ${s.km.toFixed(0)} km away`}
+                    </span>
+                  </div>
+                  <div className="saved-suggest-actions">
+                    <button
+                      type="button"
+                      className="btn-orange btn-small"
+                      onClick={() => addSuggestedSavedPlace(s.place, s.when)}
+                    >
+                      Add
+                    </button>
+                    <button
+                      type="button"
+                      className="btn-secondary btn-small"
+                      onClick={() => setDismissedSuggestions(prev => [...prev, s.place.id])}
+                    >
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
 
           {days.length > 0 && (
             <div className="day-chip-row" role="tablist" aria-label="Trip days">

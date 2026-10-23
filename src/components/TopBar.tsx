@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Logo from './Logo'
+import NotificationBell from './NotificationBell'
 import { useAuth } from '../context/AuthContext'
 import * as api from '../lib/data'
 import { bookingStatusLabel, formatDateRange, tripDurationDays, type Trip } from '../lib/types'
@@ -57,7 +58,8 @@ export default function TopBar() {
       <div className="topbar-center" title={typeof centerCopy === 'string' ? centerCopy : undefined}>
         {centerCopy}
       </div>
-      <div ref={ref} style={{ position: 'relative' }}>
+      <div ref={ref} style={{ position: 'relative', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <NotificationBell />
         <button
           type="button"
           aria-haspopup="menu"

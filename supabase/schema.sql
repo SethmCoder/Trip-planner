@@ -6,7 +6,12 @@ do $$ begin create type item_type as enum ('transit','hotel','activity'); except
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
   username text unique not null, email text not null, avatar_url text,
+  booking_alerts_enabled boolean not null default true,
+  preferred_language text not null default 'en',
   created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+-- Existing projects: notification + language prefs
+alter table public.profiles add column if not exists booking_alerts_enabled boolean not null default true;
+alter table public.profiles add column if not exists preferred_language text not null default 'en';
 
 create table if not exists public.trips (
   id uuid primary key default gen_random_uuid(),
@@ -54,10 +59,60 @@ create index if not exists idx_trips_user on public.trips(user_id);
 create index if not exists idx_items_trip on public.itinerary_items(trip_id, sort_order);
 create index if not exists idx_saved_places_user on public.saved_places(user_id, created_at desc);
 
+-- In-app notifications (booking window opened, etc.)
+create table if not exists public.notifications (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  title text not null default '',
+  body text not null default '',
+  kind text not null default 'booking_open',
+  item_id uuid,
+  trip_id uuid,
+  read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists idx_notifications_dedupe
+  on public.notifications (user_id, kind, item_id)
+  where item_id is not null;
+create index if not exists idx_notifications_user on public.notifications(user_id, created_at desc);
+
+-- Insert booking-open notifications for users who opted in (call daily via pg_cron or the app).
+create or replace function public.generate_booking_open_notifications()
+returns integer
+language plpgsql
+security definer
+as $$
+declare
+  inserted int := 0;
+begin
+  insert into public.notifications (user_id, title, body, kind, item_id, trip_id)
+  select
+    i.user_id,
+    'Booking window open',
+    coalesce(nullif(i.title, ''), 'An itinerary item') || ' — booking is now open.',
+    'booking_open',
+    i.id,
+    i.trip_id
+  from public.itinerary_items i
+  join public.profiles p on p.id = i.user_id
+  where coalesce(p.booking_alerts_enabled, true) = true
+    and i.booking_open_date is not null
+    and i.booking_open_date <= current_date
+    and i.booking_status is distinct from 'booked'
+    and not exists (
+      select 1 from public.notifications n
+      where n.user_id = i.user_id and n.kind = 'booking_open' and n.item_id = i.id
+    );
+  get diagnostics inserted = row_count;
+  return inserted;
+end;
+$$;
+
 alter table public.profiles enable row level security;
 alter table public.trips enable row level security;
 alter table public.itinerary_items enable row level security;
 alter table public.saved_places enable row level security;
+alter table public.notifications enable row level security;
 drop policy if exists "own profile" on public.profiles;
 create policy "own profile" on public.profiles for all using (auth.uid() = id) with check (auth.uid() = id);
 -- Allow username->email lookup for login (only email column is used by app)
@@ -69,6 +124,8 @@ drop policy if exists "own items" on public.itinerary_items;
 create policy "own items" on public.itinerary_items for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 drop policy if exists "own saved places" on public.saved_places;
 create policy "own saved places" on public.saved_places for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+drop policy if exists "own notifications" on public.notifications;
+create policy "own notifications" on public.notifications for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 create or replace function public.handle_new_user() returns trigger language plpgsql security definer as $$
 begin insert into public.profiles (id, email, username) values (new.id, new.email, split_part(new.email,'@',1)) on conflict (id) do nothing; return new; end; $$;

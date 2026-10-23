@@ -26,6 +26,57 @@ export interface MapPoi {
   name: string
   category: PoiCategory
   label: string
+  /** Higher = more notable (Wikipedia, attractions, etc.). Used for zoom-aware filtering. */
+  score?: number
+}
+
+/** How many pins to show at a given map zoom (popular first). */
+export function poiLimitForZoom(zoom: number): number {
+  if (zoom >= 16) return 36
+  if (zoom >= 14) return 22
+  if (zoom >= 12) return 14
+  return 8
+}
+
+/** Category weight — more “destination-y” types win when zoomed out. */
+const CATEGORY_SCORE: Record<PoiCategory, number> = {
+  attraction: 40,
+  museum: 38,
+  monument: 36,
+  shrine: 34,
+  stadium: 32,
+  train_station: 30,
+  beach: 28,
+  park: 22,
+  hotel: 18,
+  restaurant: 14,
+  cafe: 10,
+  hospital: 8,
+  school: 4,
+  other: 2,
+}
+
+/** Popularity from free OSM tags (no paid ranking API). */
+export function popularityScore(tags: Record<string, string> | undefined, category: PoiCategory): number {
+  let s = CATEGORY_SCORE[category] ?? 0
+  if (!tags) return s
+  if (tags.wikipedia || tags['wikipedia:en']) s += 55
+  if (tags.wikidata) s += 35
+  if (tags.heritage || tags['heritage:operator']) s += 30
+  if (tags.tourism === 'attraction' || tags.tourism === 'viewpoint') s += 20
+  if (tags.tourism === 'museum' || tags.tourism === 'gallery') s += 15
+  if (tags.iata || tags.icao) s += 40
+  if (tags.railway === 'station') s += 12
+  if (tags.stars) {
+    const stars = parseFloat(tags.stars)
+    if (Number.isFinite(stars)) s += stars * 6
+  }
+  if (tags.wikimedia_commons) s += 10
+  if (tags.image) s += 6
+  const tagCount = Object.keys(tags).length
+  if (tagCount >= 8) s += 4
+  if (tagCount >= 14) s += 4
+  return s
 }
 
 const CATEGORY_META: Record<PoiCategory, { color: string; emoji: string; title: string }> = {
@@ -119,45 +170,95 @@ const OVERPASS_ENDPOINTS = [
   'https://overpass.kumi.systems/api/interpreter',
 ]
 
-function buildQuery(bbox: string, experiencesOnly = false) {
-  if (experiencesOnly) {
+/**
+ * Zoom-tiered Overpass queries: zoomed-out = fewer headline places (faster);
+ * zoomed-in = denser categories. Always prefer named features.
+ */
+function buildQuery(bbox: string, opts?: { experiencesOnly?: boolean; zoom?: number; limit?: number }) {
+  const zoom = opts?.zoom ?? 14
+  const limit = opts?.limit ?? poiLimitForZoom(zoom)
+  const fetchN = Math.min(80, Math.max(limit * 2, limit + 8))
+
+  if (opts?.experiencesOnly) {
     return `
-[out:json][timeout:20];
+[out:json][timeout:12];
 (
-  nwr["tourism"="attraction"](${bbox});
-  nwr["tourism"="viewpoint"](${bbox});
-  nwr["tourism"="museum"](${bbox});
-  nwr["tourism"="gallery"](${bbox});
-  nwr["tourism"="zoo"](${bbox});
-  nwr["tourism"="theme_park"](${bbox});
-  nwr["tourism"="shrine"](${bbox});
-  nwr["historic"](${bbox});
+  nwr["tourism"="attraction"]["name"](${bbox});
+  nwr["tourism"="viewpoint"]["name"](${bbox});
+  nwr["tourism"="museum"]["name"](${bbox});
+  nwr["tourism"="gallery"]["name"](${bbox});
+  nwr["tourism"="zoo"]["name"](${bbox});
+  nwr["tourism"="theme_park"]["name"](${bbox});
+  nwr["tourism"="shrine"]["name"](${bbox});
+  nwr["historic"~"monument|memorial|castle"]["name"](${bbox});
   nwr["leisure"="park"]["name"](${bbox});
-  nwr["natural"="beach"](${bbox});
-  nwr["leisure"="stadium"](${bbox});
+  nwr["natural"="beach"]["name"](${bbox});
+  nwr["leisure"="stadium"]["name"](${bbox});
 );
-out center 60;
+out center ${fetchN};
 `
   }
-  return `
-[out:json][timeout:20];
+
+  // Far out: only notable landmarks (fast)
+  if (zoom < 13) {
+    return `
+[out:json][timeout:10];
 (
-  nwr["tourism"~"hotel|hostel|guest_house"](${bbox});
-  nwr["amenity"~"restaurant|cafe|fast_food|hospital|clinic"](${bbox});
-  nwr["amenity"~"school|university"](${bbox});
-  nwr["tourism"="museum"](${bbox});
-  nwr["tourism"="attraction"](${bbox});
-  nwr["tourism"="viewpoint"](${bbox});
-  nwr["tourism"="shrine"](${bbox});
-  nwr["railway"="station"](${bbox});
-  nwr["public_transport"="station"](${bbox});
-  nwr["historic"~"monument|memorial"](${bbox});
-  nwr["natural"="beach"](${bbox});
-  nwr["leisure"="park"]["name"](${bbox});
-  nwr["leisure"="stadium"](${bbox});
-  nwr["amenity"="place_of_worship"]["religion"~"shinto|buddhist"](${bbox});
+  nwr["tourism"="attraction"]["name"](${bbox});
+  nwr["tourism"="museum"]["name"](${bbox});
+  nwr["tourism"="viewpoint"]["name"](${bbox});
+  nwr["railway"="station"]["name"](${bbox});
+  nwr["historic"~"monument|memorial|castle"]["name"](${bbox});
+  nwr["leisure"="stadium"]["name"](${bbox});
+  nwr["tourism"="shrine"]["name"](${bbox});
+  nwr["natural"="beach"]["name"](${bbox});
 );
-out center 80;
+out center ${fetchN};
+`
+  }
+
+  // Mid zoom: landmarks + hotels + parks
+  if (zoom < 15) {
+    return `
+[out:json][timeout:12];
+(
+  nwr["tourism"="attraction"]["name"](${bbox});
+  nwr["tourism"="museum"]["name"](${bbox});
+  nwr["tourism"="viewpoint"]["name"](${bbox});
+  nwr["tourism"~"hotel|hostel"]["name"](${bbox});
+  nwr["railway"="station"]["name"](${bbox});
+  nwr["public_transport"="station"]["name"](${bbox});
+  nwr["historic"~"monument|memorial"]["name"](${bbox});
+  nwr["leisure"="park"]["name"](${bbox});
+  nwr["leisure"="stadium"]["name"](${bbox});
+  nwr["tourism"="shrine"]["name"](${bbox});
+  nwr["natural"="beach"]["name"](${bbox});
+  nwr["amenity"="place_of_worship"]["religion"~"shinto|buddhist"]["name"](${bbox});
+);
+out center ${fetchN};
+`
+  }
+
+  // Close in: everyday places too
+  return `
+[out:json][timeout:14];
+(
+  nwr["tourism"~"hotel|hostel|guest_house"]["name"](${bbox});
+  nwr["amenity"~"restaurant|cafe|fast_food"]["name"](${bbox});
+  nwr["amenity"~"hospital|clinic"]["name"](${bbox});
+  nwr["tourism"="museum"]["name"](${bbox});
+  nwr["tourism"="attraction"]["name"](${bbox});
+  nwr["tourism"="viewpoint"]["name"](${bbox});
+  nwr["tourism"="shrine"]["name"](${bbox});
+  nwr["railway"="station"]["name"](${bbox});
+  nwr["public_transport"="station"]["name"](${bbox});
+  nwr["historic"~"monument|memorial"]["name"](${bbox});
+  nwr["natural"="beach"]["name"](${bbox});
+  nwr["leisure"="park"]["name"](${bbox});
+  nwr["leisure"="stadium"]["name"](${bbox});
+  nwr["amenity"="place_of_worship"]["religion"~"shinto|buddhist"]["name"](${bbox});
+);
+out center ${fetchN};
 `
 }
 
@@ -195,7 +296,7 @@ function popupHtml(name: string, category: PoiCategory, lat: number, lng: number
   ].join('')
 }
 
-function parseElements(elements: any[], placeContext: string): MapPoi[] {
+function parseElements(elements: any[], placeContext: string, limit = 40): MapPoi[] {
   const seen = new Set<string>()
   const pois: MapPoi[] = []
   for (const el of elements ?? []) {
@@ -215,11 +316,13 @@ function parseElements(elements: any[], placeContext: string): MapPoi[] {
       lng,
       name,
       category,
+      score: popularityScore(tags, category),
       label: popupHtml(name, category, lat, lng, placeContext, { pinId: id }),
     })
-    if (pois.length >= 50) break
   }
   return pois
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0) || a.name.localeCompare(b.name))
+    .slice(0, limit)
 }
 
 async function postOverpass(query: string, signal?: AbortSignal): Promise<any[]> {
@@ -284,18 +387,24 @@ async function nominatimFallback(bounds: {
 
 export async function fetchNearbyPois(
   bounds: { south: number; west: number; north: number; east: number },
-  opts?: { signal?: AbortSignal; experiencesOnly?: boolean; placeContext?: string },
+  opts?: { signal?: AbortSignal; experiencesOnly?: boolean; placeContext?: string; zoom?: number },
 ): Promise<MapPoi[]> {
   const { south, west, north, east } = bounds
   const bbox = `${south},${west},${north},${east}`
   const placeContext = opts?.placeContext ?? ''
-  const query = buildQuery(bbox, opts?.experiencesOnly)
+  const zoom = opts?.zoom ?? 14
+  const limit = poiLimitForZoom(zoom)
+  const query = buildQuery(bbox, {
+    experiencesOnly: opts?.experiencesOnly,
+    zoom,
+    limit,
+  })
 
   let elements = await postOverpass(query, opts?.signal)
   if (elements.length === 0 && !opts?.experiencesOnly) {
     elements = await nominatimFallback(bounds, opts?.signal)
   }
-  return parseElements(elements, placeContext)
+  return parseElements(elements, placeContext, limit)
 }
 
 export async function fetchExperiences(

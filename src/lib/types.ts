@@ -1,6 +1,41 @@
 export type BookingStatus = 'not_booked' | 'partially_booked' | 'booked'
 export type ItemType = 'transit' | 'hotel' | 'activity' | 'restaurant'
-export interface Profile { id: string; username: string; email: string; avatar_url: string | null }
+export type DisplayLanguage = 'en' | 'es' | 'fr' | 'de' | 'ja' | 'ko' | 'zh-CN' | 'pt' | 'it'
+
+export interface Profile {
+  id: string
+  username: string
+  email: string
+  avatar_url: string | null
+  /** When true, alert when an item's booking window opens. */
+  booking_alerts_enabled?: boolean
+  /** Language used to display place / item names. */
+  preferred_language?: DisplayLanguage | string
+}
+
+export interface AppNotification {
+  id: string
+  user_id: string
+  title: string
+  body: string
+  kind: string
+  item_id: string | null
+  trip_id: string | null
+  read: boolean
+  created_at: string
+}
+
+export const LANGUAGE_OPTIONS: { code: DisplayLanguage; label: string }[] = [
+  { code: 'en', label: 'English' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'fr', label: 'French' },
+  { code: 'de', label: 'German' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' },
+  { code: 'zh-CN', label: 'Chinese (Simplified)' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'it', label: 'Italian' },
+]
 export interface Stop { name: string; lat?: number; lng?: number }
 export interface Trip {
   id: string; user_id: string; name: string; place: string; place_lat: number | null; place_lng: number | null
