@@ -8,9 +8,42 @@ import StatusBadge from '../components/StatusBadge'
 import { useAuth } from '../context/AuthContext'
 import * as api from '../lib/data'
 import { searchPlaces, type GeoResult } from '../lib/geocoding'
-import { bookingLink } from '../lib/bookingLinks'
-import { newId, fmtDate, type Trip, type ItineraryItem } from '../lib/types'
+import { bookingLink, discoveryLinks } from '../lib/bookingLinks'
+import { newId, fmtDate, destinationThumbUrl, type Trip, type ItineraryItem } from '../lib/types'
 import { calculateTransitMinutes, formatTransitTime, isFlight, addMinutes, getQuickestRoute, estimateGapTravel, formatCompactDuration, type LatLng, type GapTravel } from '../lib/routing'
+import { fetchExperiences, poiMeta, type MapPoi } from '../lib/pois'
+import { resolveTripImage } from '../lib/tripImages'
+import { destinationTravelLinks, poiTravelLinks } from '../lib/travelApps'
+import { shortAddress, hotelStayTitle, hotelPhase } from '../lib/formatPlace'
+import DestinationThumb from '../components/DestinationThumb'
+
+const STAY_COLORS = ['#2563EB', '#7C3AED', '#0891B2', '#DB2777', '#059669', '#D97706']
+
+function compactGeo(r: GeoResult): GeoResult {
+  return { ...r, name: shortAddress(r.name, 1) || r.name, display: shortAddress(r.display, 2) || r.display }
+}
+
+function categoryMeta(it: ItineraryItem) {
+  if (it.type === 'transit') return { label: 'Transit', color: '#F97316', icon: '✈' }
+  if (it.type === 'hotel') return { label: it.subtype === 'checkout' ? 'Hotel · Check-out' : it.subtype === 'checkin' ? 'Hotel · Check-in' : 'Hotel', color: '#2563EB', icon: '🏨' }
+  if (it.type === 'restaurant') return { label: 'Restaurant', color: '#DC2626', icon: '🍽' }
+  return { label: 'Experience', color: '#0D9488', icon: '★' }
+}
+
+function ItemThumb({ it }: { it: ItineraryItem }) {
+  const meta = categoryMeta(it)
+  const [failed, setFailed] = useState(false)
+  const src = !failed
+    ? (it.image_url || (it.lat != null && it.lng != null ? destinationThumbUrl(it.lat, it.lng, 14) : null))
+    : null
+  return (
+    <div className="item-thumb" style={{ background: meta.color }} aria-hidden>
+      {src
+        ? <img src={src} alt="" onError={() => setFailed(true)} />
+        : <span className="item-thumb-icon">{meta.icon}</span>}
+    </div>
+  )
+}
 
 const baseItem = (trip: Trip, userId: string, order: number): ItineraryItem => ({
   id: newId(), trip_id: trip.id, user_id: userId, type: 'activity', group_id: null, title: '', place_name: '',
@@ -40,8 +73,19 @@ function PlaceSearch({ label, onPick }: { label: string; onPick: (r: GeoResult) 
       {res.length > 0 && (
         <div className="autocomplete" role="listbox">
           {res.map((r, i) => (
-            <button key={`${r.lat}-${r.lng}-${i}`} type="button" role="option" onClick={() => { onPick(r); setPicked(r.name); setRes([]) }}>
-              {r.display}
+            <button
+              key={`${r.lat}-${r.lng}-${i}`}
+              type="button"
+              role="option"
+              onClick={() => {
+                const c = compactGeo(r)
+                onPick(c)
+                setPicked(c.name)
+                setRes([])
+              }}
+            >
+              <span className="ac-name">{shortAddress(r.name, 1) || r.name}</span>
+              <span className="ac-detail">{shortAddress(r.display, 3)}</span>
             </button>
           ))}
         </div>
@@ -50,20 +94,15 @@ function PlaceSearch({ label, onPick }: { label: string; onPick: (r: GeoResult) 
   )
 }
 
-function typeLabel(it: ItineraryItem) {
-  if (it.type === 'transit') return 'Transit'
-  if (it.type === 'hotel') return 'Hotel / Stay'
-  if (it.type === 'restaurant') return 'Restaurant'
-  return 'Things to Do'
-}
-
 export default function TripPage() {
   const { id } = useParams()
   const { profile } = useAuth()
   const nav = useNavigate()
   const [trip, setTrip] = useState<Trip | null>(null)
   const [items, setItems] = useState<ItineraryItem[]>([])
-  const [divide, setDivide] = useState(false)
+  const [divide, setDivide] = useState(true)
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
+  const [dayRoutePaths, setDayRoutePaths] = useState<Record<string, LatLng[]>>({})
   const [dragId, setDragId] = useState<string | null>(null)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [from, setFrom] = useState<GeoResult | null>(null)
@@ -79,10 +118,13 @@ export default function TripPage() {
   const [rest, setRest] = useState<GeoResult | null>(null)
   const [rTime, setRTime] = useState('')
   const [mobilePanel, setMobilePanel] = useState<'create' | 'map' | 'places'>('map')
+  const [rightTab, setRightTab] = useState<'places' | 'experiences'>('places')
+  const [experiences, setExperiences] = useState<MapPoi[]>([])
+  const [expStatus, setExpStatus] = useState<'idle' | 'loading' | 'ready' | 'empty' | 'need-place'>('idle')
 
   useEffect(() => {
     if (id) {
-      api.getTrip(id).then(t => {
+      api.getTrip(id).then(async t => {
         setTrip(t)
         if (t) {
           setTStart(`${t.start_date}T09:00`)
@@ -91,6 +133,14 @@ export default function TripPage() {
           setHOut(`${t.end_date}T11:00`)
           setATime(`${t.start_date}T10:00`)
           setRTime(`${t.start_date}T19:00`)
+          if (t.place && !t.image_url) {
+            const img = await resolveTripImage(t.place, t.place_lat, t.place_lng)
+            if (img) {
+              const updated = { ...t, image_url: img }
+              setTrip(updated)
+              try { await api.saveTrip(updated) } catch { /* schema may lack image_url */ }
+            }
+          }
         }
       })
       api.listItems(id).then(setItems)
@@ -143,6 +193,67 @@ export default function TripPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gapSignature])
 
+  useEffect(() => {
+    if (rightTab !== 'experiences' || !trip?.place_lat || !trip?.place_lng) {
+      if (rightTab === 'experiences' && trip && (trip.place_lat == null || trip.place_lng == null)) setExpStatus('need-place')
+      return
+    }
+    let cancelled = false
+    setExpStatus('loading')
+    const pad = 0.12
+    fetchExperiences({
+      south: trip.place_lat - pad,
+      west: trip.place_lng - pad,
+      north: trip.place_lat + pad,
+      east: trip.place_lng + pad,
+    }, trip.place).then(list => {
+      if (cancelled) return
+      setExperiences(list)
+      setExpStatus(list.length ? 'ready' : 'empty')
+    })
+    return () => { cancelled = true }
+  }, [rightTab, trip?.place_lat, trip?.place_lng, trip?.place])
+
+  // Per-day route between that day's stops (e.g. Skytree → Tokyo Tower → Shibuya)
+  const dayRouteSignature = useMemo(() => {
+    if (!selectedDay) return ''
+    return items
+      .filter(i => i.start_at.slice(0, 10) === selectedDay && i.lat != null && i.lng != null)
+      .sort((a, b) => a.sort_order - b.sort_order || a.start_at.localeCompare(b.start_at))
+      .map(i => `${i.id}:${i.lat},${i.lng}`)
+      .join('|')
+  }, [selectedDay, items])
+
+  useEffect(() => {
+    if (!selectedDay || !dayRouteSignature) {
+      setDayRoutePaths({})
+      return
+    }
+    let cancelled = false
+    const stops = items
+      .filter(i => i.start_at.slice(0, 10) === selectedDay && i.lat != null && i.lng != null)
+      .sort((a, b) => a.sort_order - b.sort_order || a.start_at.localeCompare(b.start_at))
+    ;(async () => {
+      const paths: Record<string, LatLng[]> = {}
+      for (let i = 0; i < stops.length - 1; i++) {
+        const a = stops[i], b = stops[i + 1]
+        const key = `${a.id}->${b.id}`
+        try {
+          const route = await getQuickestRoute(
+            { lat: a.lat!, lng: a.lng! },
+            { lat: b.lat!, lng: b.lng! },
+            a.type === 'transit' ? (a.mode_of_transport || 'car') : 'foot',
+          )
+          paths[key] = route?.path?.length ? route.path : [{ lat: a.lat!, lng: a.lng! }, { lat: b.lat!, lng: b.lng! }]
+        } catch {
+          paths[key] = [{ lat: a.lat!, lng: a.lng! }, { lat: b.lat!, lng: b.lng! }]
+        }
+      }
+      if (!cancelled) setDayRoutePaths(paths)
+    })()
+    return () => { cancelled = true }
+  }, [dayRouteSignature, selectedDay, items])
+
   if (!profile) return null
   if (!trip) {
     return (
@@ -181,7 +292,7 @@ export default function TripPage() {
     addItems([{
       ...baseItem(trip, profile.id, items.length), type: 'transit', title: `${from.name} → ${to.name}`,
       from_name: from.name, from_lat: from.lat, from_lng: from.lng, to_name: to.name, to_lat: to.lat, to_lng: to.lng,
-      lat: to.lat, lng: to.lng, place_name: to.name, start_at: tStart, end_at: end, duration_minutes: dur, mode_of_transport: mode,
+      lat: to.lat, lng: to.lng, place_name: shortAddress(to.display, 2) || to.name, start_at: tStart, end_at: end, duration_minutes: dur, mode_of_transport: mode,
     }])
   }
   const recalcTransit = async (it: ItineraryItem) => {
@@ -196,7 +307,8 @@ export default function TripPage() {
   const addHotel = () => {
     if (!hotel) return alert('Pick a hotel / place')
     const gid = newId()
-    const common = { ...baseItem(trip, profile.id, items.length), type: 'hotel' as const, group_id: gid, title: hotel.name, place_name: hotel.display, lat: hotel.lat, lng: hotel.lng }
+    const place = shortAddress(hotel.display, 2) || hotel.name
+    const common = { ...baseItem(trip, profile.id, items.length), type: 'hotel' as const, group_id: gid, title: hotel.name, place_name: place, lat: hotel.lat, lng: hotel.lng }
     addItems([
       { ...common, id: newId(), subtype: 'checkin', title: `${hotel.name} (Check-in)`, start_at: hIn, end_at: hIn, sort_order: items.length },
       { ...common, id: newId(), subtype: 'checkout', title: `${hotel.name} (Check-out)`, start_at: hOut, end_at: hOut, sort_order: items.length + 1 },
@@ -204,42 +316,80 @@ export default function TripPage() {
   }
   const addActivity = () => {
     if (!act) return alert('Pick a place to visit')
-    addItems([{ ...baseItem(trip, profile.id, items.length), type: 'activity', title: act.name, place_name: act.display, lat: act.lat, lng: act.lng, start_at: aTime, end_at: aTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(act.name)}/400/220` }])
+    addItems([{
+      ...baseItem(trip, profile.id, items.length), type: 'activity', title: act.name,
+      place_name: shortAddress(act.display, 2) || act.name, lat: act.lat, lng: act.lng,
+      start_at: aTime, end_at: aTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(act.name)}/400/220`,
+    }])
   }
   const addRestaurant = () => {
     if (!rest) return alert('Pick a restaurant')
-    addItems([{ ...baseItem(trip, profile.id, items.length), type: 'restaurant', title: rest.name, place_name: rest.display, lat: rest.lat, lng: rest.lng, start_at: rTime, end_at: rTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(rest.name + '-food')}/400/220` }])
+    addItems([{
+      ...baseItem(trip, profile.id, items.length), type: 'restaurant', title: rest.name,
+      place_name: shortAddress(rest.display, 2) || rest.name, lat: rest.lat, lng: rest.lng,
+      start_at: rTime, end_at: rTime, image_url: `https://picsum.photos/seed/${encodeURIComponent(rest.name + '-food')}/400/220`,
+    }])
   }
 
-  const ordered = [...items].sort((a, b) => a.sort_order - b.sort_order)
+  const ordered = [...items].sort((a, b) => a.sort_order - b.sort_order || a.start_at.localeCompare(b.start_at))
+
+  const hotelStayIndex = (() => {
+    const map = new Map<string, number>()
+    let n = 0
+    for (const it of ordered) {
+      if (it.type === 'hotel' && it.group_id && !map.has(it.group_id)) map.set(it.group_id, ++n)
+    }
+    return map
+  })()
+
+  const mapSourceItems = selectedDay
+    ? ordered.filter(i => i.start_at.slice(0, 10) === selectedDay && i.lat != null && i.lng != null)
+    : ordered.filter(i => i.lat != null && i.lng != null)
+
   const pins: { id: string; lat: number; lng: number; label: string; number?: number; kind?: string }[] =
-    ordered.filter(i => i.lat != null && i.lng != null).map((i, ix) => ({
+    mapSourceItems.map((i, ix) => ({
       id: i.id,
       lat: i.lat!,
       lng: i.lng!,
-      label: `<b>${i.title}</b><br/>${typeLabel(i)}<br/>${i.place_name || ''}`,
+      label: `<b>${shortAddress(i.title, 1) || i.title}</b><br/>${categoryMeta(i).label}<br/>${shortAddress(i.place_name)}`,
       number: ix + 1,
       kind: i.type,
     }))
-  // Also pin the trip destination when itinerary is empty but place is set
-  if (pins.length === 0 && trip.place_lat != null && trip.place_lng != null) {
+  if (pins.length === 0 && !selectedDay && trip.place_lat != null && trip.place_lng != null) {
     pins.push({
       id: `trip-dest-${trip.id}`,
       lat: trip.place_lat,
       lng: trip.place_lng,
-      label: `<b>${trip.name || 'Trip'}</b><br/>${trip.place}`,
+      label: `<b>${trip.name || 'Trip'}</b><br/>${shortAddress(trip.place)}`,
       kind: 'destination',
     })
   }
-  const segments = ordered
+
+  const transitSegments = ordered
     .filter(i => i.type === 'transit' && i.from_lat != null && i.from_lng != null && i.to_lat != null && i.to_lng != null)
+    .filter(i => !selectedDay || i.start_at.slice(0, 10) === selectedDay)
     .map(i => ({
       id: i.id,
       fromLat: i.from_lat!, fromLng: i.from_lng!, toLat: i.to_lat!, toLng: i.to_lng!,
       path: routePaths[i.id],
-      label: `<b>${i.title}</b><br/>1 (Start): ${i.from_name}<br/>2 (Finish): ${i.to_name}${i.mode_of_transport ? `<br/>${i.mode_of_transport}` : ''}<br/>Quickest route`,
+      label: `<b>${i.title}</b><br/>${shortAddress(i.from_name, 1)} → ${shortAddress(i.to_name, 1)}`,
     }))
 
+  const dayPathSegments = selectedDay
+    ? mapSourceItems.slice(0, -1).map((a, i) => {
+      const b = mapSourceItems[i + 1]
+      const key = `${a.id}->${b.id}`
+      return {
+        id: `day-${key}`,
+        fromLat: a.lat!, fromLng: a.lng!, toLat: b.lat!, toLng: b.lng!,
+        path: dayRoutePaths[key],
+        label: `<b>Day route</b><br/>${shortAddress(a.title || a.place_name, 1)} → ${shortAddress(b.title || b.place_name, 1)}`,
+      }
+    })
+    : []
+
+  const segments = selectedDay ? [...dayPathSegments, ...transitSegments] : transitSegments
+  const showDayRoute = Boolean(selectedDay && mapSourceItems.length > 1)
   const dayLoad = (day: string) => {
     const di = ordered.filter(i => i.start_at.slice(0, 10) === day)
     return { count: di.length, mins: di.reduce((s, i) => s + (i.duration_minutes || 60), 0), items: di }
@@ -261,45 +411,74 @@ export default function TripPage() {
     await api.saveItems(arr)
   }
   const fmtWhen = (iso: string) => iso ? new Date(iso).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ''
-  const summaryOf = (it: ItineraryItem) => {
-    if (it.type === 'transit') {
-      return `${it.from_name || '?'} → ${it.to_name || '?'}${it.mode_of_transport ? ` · ${it.mode_of_transport}` : ''}${it.start_at ? ` · ${fmtWhen(it.start_at)}` : ''}${it.duration_minutes != null ? ` · ${formatTransitTime(it.duration_minutes, it.mode_of_transport)}${isFlight(it.mode_of_transport) ? '' : ' min'}` : ''}`
-    }
-    if (it.type === 'hotel') return `${it.place_name || ''}${it.start_at ? ` · ${it.subtype === 'checkout' ? 'Check-out' : 'Check-in'} ${fmtWhen(it.start_at)}` : ''}`
-    return `${it.place_name || ''}${it.start_at ? ` · ${fmtWhen(it.start_at)}` : ''}`
+
+  const addExperienceToTrip = async (poi: MapPoi) => {
+    if (!profile || !trip) return
+    await addItems([{
+      ...baseItem(trip, profile.id, items.length),
+      type: 'activity',
+      title: poi.name,
+      place_name: shortAddress(trip.place, 2) || poi.name,
+      lat: poi.lat,
+      lng: poi.lng,
+      start_at: aTime || `${trip.start_date}T10:00`,
+      end_at: aTime || `${trip.start_date}T10:00`,
+      image_url: '',
+    }])
+    setRightTab('places')
+  }
+
+  const selectDay = (day: string) => {
+    setSelectedDay(prev => prev === day ? null : day)
+    setDivide(true)
+    setMobilePanel('map')
   }
 
   const card = (it: ItineraryItem) => {
     const link = bookingLink(it)
+    const extra = discoveryLinks(it)
     const isOpen = expandedId === it.id
     const toggle = () => setExpandedId(isOpen ? null : it.id)
+    const cat = categoryMeta(it)
+    const stayNum = it.type === 'hotel' && it.group_id ? hotelStayIndex.get(it.group_id) : undefined
+    const stayColor = stayNum ? STAY_COLORS[(stayNum - 1) % STAY_COLORS.length] : cat.color
+    const displayTitle = it.type === 'hotel' ? hotelStayTitle(it.title) : (it.title || 'Untitled')
+    const placeLine = it.type === 'transit'
+      ? `${shortAddress(it.from_name, 1) || '?'} → ${shortAddress(it.to_name, 1) || '?'}`
+      : shortAddress(it.place_name) || shortAddress(it.title, 1)
+    const timeLine = it.type === 'hotel'
+      ? `${hotelPhase(it.subtype)} · ${fmtWhen(it.start_at)}`
+      : it.type === 'transit'
+        ? `${fmtWhen(it.start_at)}${it.mode_of_transport ? ` · ${it.mode_of_transport}` : ''}${it.duration_minutes != null ? ` · ${formatTransitTime(it.duration_minutes, it.mode_of_transport)}${isFlight(it.mode_of_transport) ? '' : ' min'}` : ''}`
+        : fmtWhen(it.start_at)
+
     return (
       <div
         key={it.id}
-        className={`place-card place-card-${it.type}${isOpen ? ' open' : ''}`}
+        className={`place-card place-card-${it.type}${isOpen ? ' open' : ''}${stayNum ? ` stay-${stayNum}` : ''}`}
+        style={{ borderLeftColor: stayColor }}
         draggable
         onDragStart={() => setDragId(it.id)}
         onDragOver={e => e.preventDefault()}
         onDrop={() => onDrop(it.id)}
       >
         <div className="place-card-summary" onClick={toggle} title={isOpen ? 'Click to collapse' : 'Click to expand'}>
+          <ItemThumb it={it} />
           <div className="place-card-main">
-            <div className="place-card-type">⠿ {typeLabel(it).toUpperCase()}</div>
-            <div className="place-card-title">{it.title || 'Untitled'}</div>
-            <div className="place-card-sub">{summaryOf(it)}</div>
+            <div className="place-card-badges">
+              <span className="cat-badge" style={{ background: `${cat.color}18`, color: cat.color, borderColor: `${cat.color}55` }}>
+                {cat.icon} {cat.label}
+              </span>
+              {stayNum != null && (
+                <span className="stay-badge" style={{ background: stayColor }}>{`Stay ${stayNum}`}</span>
+              )}
+            </div>
+            <div className="place-card-title">{displayTitle}</div>
+            {placeLine && <div className="place-card-place">{placeLine}</div>}
+            {timeLine && <div className="place-card-time">{timeLine}</div>}
             {(it.booking_open_date || it.book_by_date) && (
-              <div
-                className="place-card-booking-dates"
-                style={{
-                  fontWeight: it.book_by_date && it.booking_status !== 'booked' && it.book_by_date <= new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10) ? 700 : 400,
-                  color: it.book_by_date && it.booking_status !== 'booked' && it.book_by_date < new Date().toISOString().slice(0, 10)
-                    ? 'var(--destructive)'
-                    : it.book_by_date && it.booking_status !== 'booked' && it.book_by_date <= new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10)
-                      ? 'var(--orange)'
-                      : 'var(--text-secondary)',
-                }}
-              >
-                {it.booking_open_date ? `Booking opens ${fmtDate(it.booking_open_date)}` : ''}
+              <div className="place-card-booking-dates">
+                {it.booking_open_date ? `Opens ${fmtDate(it.booking_open_date)}` : ''}
                 {it.booking_open_date && it.book_by_date ? ' · ' : ''}
                 {it.book_by_date ? `Book by ${fmtDate(it.book_by_date)}` : ''}
               </div>
@@ -321,9 +500,6 @@ export default function TripPage() {
             </button>
           </div>
         </div>
-        {!isOpen && (it.type === 'activity' || it.type === 'restaurant') && it.image_url && (
-          <img src={it.image_url} alt="" className="place-card-thumb" />
-        )}
         {isOpen && (
           <div className="place-card-body">
             <label>Name / Title</label>
@@ -351,12 +527,12 @@ export default function TripPage() {
             {it.type === 'hotel' && (
               <>
                 <label>Hotel Name</label>
-                <input value={it.title.replace(/ \((Check-in|Check-out)\)$/, '')} onChange={e => update({ ...it, title: `${e.target.value} (${it.subtype === 'checkout' ? 'Check-out' : 'Check-in'})` })} />
-                <label>Place</label><input value={it.place_name} onChange={e => update({ ...it, place_name: e.target.value })} />
-                <p style={{ fontSize: 12, margin: '6px 0', color: 'var(--text-secondary)' }}>
-                  {it.subtype === 'checkout' ? 'End of stay (Check-out)' : 'Beginning of stay (Check-in)'}: <b style={{ color: 'var(--text)' }}>{fmtDate(it.start_at)}</b>
+                <input value={hotelStayTitle(it.title)} onChange={e => update({ ...it, title: `${e.target.value} (${it.subtype === 'checkout' ? 'Check-out' : 'Check-in'})` })} />
+                <label>Place</label><input value={it.place_name} onChange={e => update({ ...it, place_name: shortAddress(e.target.value) || e.target.value })} />
+                <p className="place-card-time" style={{ margin: '8px 0' }}>
+                  {hotelPhase(it.subtype)}: <b>{fmtWhen(it.start_at)}</b>
                 </p>
-                <label>{it.subtype === 'checkout' ? 'Check-out' : 'Check-in'} Date &amp; Time</label>
+                <label>{hotelPhase(it.subtype)} Date &amp; Time</label>
                 <input type="datetime-local" value={it.start_at} onChange={e => update({ ...it, start_at: e.target.value, end_at: e.target.value })} />
               </>
             )}
@@ -384,6 +560,13 @@ export default function TripPage() {
             )}
             {link && (
               <a href={link.url} target="_blank" rel="noreferrer" className="place-booking-link">{link.label} ↗</a>
+            )}
+            {extra.length > 0 && (
+              <div className="travel-link-row" style={{ marginTop: 8 }}>
+                {extra.map(l => (
+                  <a key={l.label} href={l.url} target="_blank" rel="noreferrer" className="travel-chip">{l.label}</a>
+                ))}
+              </div>
             )}
             <button
               type="button"
@@ -460,62 +643,164 @@ export default function TripPage() {
     </aside>
   )
 
+  const destLinks = destinationTravelLinks(trip.place)
+
   const placesPanel = (
     <aside className="panel trip-places-sidebar">
-      <div className="places-header">
-        <h3>Your Places</h3>
-        <label className="places-toggle">
-          <span>Divide into days</span>
-          <span className="toggle">
-            <input type="checkbox" checked={divide} onChange={e => setDivide(e.target.checked)} />
-            <span className="slider" />
-          </span>
-        </label>
+      <div className="right-tabs" role="tablist" aria-label="Trip side panel">
+        <button type="button" role="tab" aria-selected={rightTab === 'places'} className={rightTab === 'places' ? 'active' : ''} onClick={() => setRightTab('places')}>Your Places</button>
+        <button type="button" role="tab" aria-selected={rightTab === 'experiences'} className={rightTab === 'experiences' ? 'active' : ''} onClick={() => setRightTab('experiences')}>Experiences</button>
       </div>
-      <p className="places-hint">Drag cards to reorder. Add items from the left panel to build your itinerary.</p>
 
-      {ordered.length === 0 && !divide && (
-        <div className="places-empty">
-          <div className="places-empty-icon" aria-hidden>
-            <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
-              <circle cx="20" cy="20" r="18" stroke="currentColor" strokeWidth="1.5" opacity="0.35" />
-              <path d="M20 10v12M14 18l6 8 6-8" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+      {rightTab === 'places' && (
+        <>
+          <div className="places-header">
+            <h3>Your Places</h3>
+            <label className="places-toggle">
+              <span>Divide into days</span>
+              <span className="toggle">
+                <input type="checkbox" checked={divide} onChange={e => {
+                  setDivide(e.target.checked)
+                  if (!e.target.checked) setSelectedDay(null)
+                }} />
+                <span className="slider" />
+              </span>
+            </label>
           </div>
-          <h4>No places yet</h4>
-          <p>Search for transit, hotels, activities, or restaurants on the left to pin them here and on the map.</p>
-        </div>
+          <p className="places-hint">
+            Drag to reorder. Click a day to show that day’s route on the map
+            {selectedDay ? <> · Viewing <b>{fmtDate(selectedDay)}</b></> : null}.
+          </p>
+
+          {days.length > 0 && (
+            <div className="day-chip-row" role="tablist" aria-label="Trip days">
+              <button
+                type="button"
+                className={`day-chip${!selectedDay ? ' active' : ''}`}
+                onClick={() => setSelectedDay(null)}
+              >
+                All days
+              </button>
+              {days.map(day => {
+                const load = dayLoad(day)
+                return (
+                  <button
+                    key={day}
+                    type="button"
+                    className={`day-chip${selectedDay === day ? ' active' : ''}`}
+                    onClick={() => selectDay(day)}
+                    title={`Show route for ${fmtDate(day)}`}
+                  >
+                    {fmtDate(day)}
+                    <span>{load.count}</span>
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          {ordered.length === 0 && !divide && (
+            <div className="places-empty">
+              <div className="places-empty-icon" aria-hidden>
+                <svg width="40" height="40" viewBox="0 0 40 40" fill="none">
+                  <circle cx="20" cy="20" r="18" stroke="currentColor" strokeWidth="1.5" opacity="0.35" />
+                  <path d="M20 10v12M14 18l6 8 6-8" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </div>
+              <h4>No places yet</h4>
+              <p>Search for transit, hotels, activities, or restaurants on the left to pin them here and on the map.</p>
+            </div>
+          )}
+
+          {!divide && renderCards(ordered)}
+          {divide && days.map(day => {
+            const load = dayLoad(day)
+            const over = load.count > 5 || load.mins > 480
+            const active = selectedDay === day
+            return (
+              <div key={day} className={`places-day${active ? ' active-day' : ''}`}>
+                <button type="button" className="places-day-title" onClick={() => selectDay(day)}>
+                  <span>
+                    {fmtDate(day)} <span className="places-day-count">({load.count} items)</span>
+                  </span>
+                  <span className="places-day-route-hint">{active ? 'Route on map' : 'Show route'}</span>
+                </button>
+                {over && (
+                  <div className="places-day-warning">
+                    This day looks full. Suggestion: move an item to <b>{fmtDate(leastFullDay)}</b>.
+                    {load.items.length > 0 && (
+                      <button type="button" className="btn-orange btn-small" style={{ marginLeft: 8 }} onClick={() => moveItem(load.items[load.items.length - 1], leastFullDay)}>
+                        Move last item there
+                      </button>
+                    )}
+                  </div>
+                )}
+                {renderCards(load.items)}
+                {load.items.length === 0 && <p className="places-day-empty">No items this day.</p>}
+              </div>
+            )
+          })}
+          {divide && ordered.filter(i => !days.includes(i.start_at.slice(0, 10))).length > 0 && (
+            <>
+              <div className="places-day-title static">Outside trip dates</div>
+              {renderCards(ordered.filter(i => !days.includes(i.start_at.slice(0, 10))))}
+            </>
+          )}
+        </>
       )}
 
-      {!divide && renderCards(ordered)}
-      {divide && days.map(day => {
-        const load = dayLoad(day)
-        const over = load.count > 5 || load.mins > 480
-        return (
-          <div key={day} className="places-day">
-            <div className="places-day-title">
-              {fmtDate(day)} <span>({load.count} items)</span>
+      {rightTab === 'experiences' && (
+        <div className="experiences-panel">
+          <h3>Experiences</h3>
+          <p className="places-hint">
+            Attractions and points of interest near {trip.place || 'your destination'}. Open TripAdvisor or Lonely Planet for reviews and booking, or add one to your itinerary.
+          </p>
+
+          {destLinks.length > 0 && (
+            <div className="travel-link-row" style={{ marginBottom: 14 }}>
+              {destLinks.map(l => (
+                <a key={l.id} href={l.url} target="_blank" rel="noreferrer" className="travel-chip" title={l.blurb}>{l.label}</a>
+              ))}
             </div>
-            {over && (
-              <div className="places-day-warning">
-                This day looks full. Suggestion: move an item to <b>{fmtDate(leastFullDay)}</b>.
-                {load.items.length > 0 && (
-                  <button type="button" className="btn-orange btn-small" style={{ marginLeft: 8 }} onClick={() => moveItem(load.items[load.items.length - 1], leastFullDay)}>
-                    Move last item there
-                  </button>
-                )}
+          )}
+
+          {expStatus === 'need-place' && (
+            <div className="places-empty">
+              <h4>Set a destination</h4>
+              <p>Choose a trip place with a map location so we can find nearby experiences.</p>
+            </div>
+          )}
+          {expStatus === 'loading' && <p className="places-hint">Finding experiences…</p>}
+          {expStatus === 'empty' && (
+            <div className="places-empty">
+              <h4>No experiences found</h4>
+              <p>Try TripAdvisor or Lonely Planet above, or zoom the map and use Nearby places.</p>
+            </div>
+          )}
+          {experiences.map(poi => {
+            const meta = poiMeta(poi.category)
+            const links = poiTravelLinks(poi.name, trip.place, poi.category)
+            return (
+              <div key={poi.id} className="experience-card">
+                <div className="experience-card-top">
+                  <span className="experience-badge" style={{ background: meta.color }}>{meta.icon}</span>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div className="experience-title">{poi.name}</div>
+                    <div className="experience-cat">{meta.title}</div>
+                  </div>
+                </div>
+                <div className="travel-link-row">
+                  {links.map(l => (
+                    <a key={l.id} href={l.url} target="_blank" rel="noreferrer" className="travel-chip">{l.label}</a>
+                  ))}
+                </div>
+                <button type="button" className="btn-orange btn-small" style={{ width: '100%', marginTop: 8 }} onClick={() => addExperienceToTrip(poi)}>
+                  Add to itinerary
+                </button>
               </div>
-            )}
-            {renderCards(load.items)}
-            {load.items.length === 0 && <p className="places-day-empty">No items this day.</p>}
-          </div>
-        )
-      })}
-      {divide && ordered.filter(i => !days.includes(i.start_at.slice(0, 10))).length > 0 && (
-        <>
-          <div className="places-day-title">Outside trip dates</div>
-          {renderCards(ordered.filter(i => !days.includes(i.start_at.slice(0, 10))))}
-        </>
+            )
+          })}
+        </div>
       )}
     </aside>
   )
@@ -534,6 +819,37 @@ export default function TripPage() {
         </div>
 
         <div className={`trip-col trip-col-center${mobilePanel === 'map' ? ' mobile-show' : ''}`}>
+          {(trip.image_url || trip.place) && (
+            <div className="trip-hero-strip">
+              <DestinationThumb
+                place={trip.place}
+                name={trip.name}
+                lat={trip.place_lat}
+                lng={trip.place_lng}
+                imageUrl={trip.image_url}
+                size={56}
+                className="trip-hero-thumb"
+              />
+              <div className="trip-hero-copy">
+                <strong>{trip.name || 'Untitled Trip'}</strong>
+                <span>{shortAddress(trip.place) || 'No destination yet'}</span>
+              </div>
+              {destLinks.slice(0, 3).map(l => (
+                <a key={l.id} href={l.url} target="_blank" rel="noreferrer" className="travel-chip">{l.label}</a>
+              ))}
+            </div>
+          )}
+          {selectedDay && (
+            <div className="day-route-banner">
+              <span>
+                Day route: <strong>{fmtDate(selectedDay)}</strong>
+                {mapSourceItems.length > 1
+                  ? ` · ${mapSourceItems.map(i => shortAddress(i.title || i.place_name, 1) || 'Stop').join(' → ')}`
+                  : ' · Add stops with locations to draw a path'}
+              </span>
+              <button type="button" className="btn-secondary btn-small" onClick={() => setSelectedDay(null)}>Clear</button>
+            </div>
+          )}
           <div className="trip-meta-bar">
             <div className="trip-meta-field trip-meta-name">
               <label htmlFor="trip-name-field">Trip Name</label>
@@ -553,7 +869,14 @@ export default function TripPage() {
               <MajorStopsInput value={trip.major_stops} onChange={stops => saveT({ ...trip, major_stops: stops })} />
             </div>
           </div>
-          <MapView pins={pins} segments={segments} showRoute enableNearbyPois />
+          <MapView
+            pins={pins}
+            segments={segments}
+            showRoute={showDayRoute || (!selectedDay && pins.length > 1)}
+            enableNearbyPois
+            showUserLocation
+            placeContext={shortAddress(trip.place) || trip.place}
+          />
         </div>
 
         <div className={`trip-col trip-col-places${mobilePanel === 'places' ? ' mobile-show' : ''}`}>

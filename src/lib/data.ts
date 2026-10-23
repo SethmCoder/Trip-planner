@@ -120,7 +120,21 @@ export async function getTrip(id: string): Promise<Trip | null> {
   return load().trips.find(t => t.id === id) ?? null
 }
 export async function saveTrip(trip: Trip): Promise<Trip> {
-  if (isSupabaseConfigured && supabase) { const { data, error } = await supabase.from('trips').upsert(trip).select().single(); if (error) throw new Error(error.message); return data }
+  if (isSupabaseConfigured && supabase) {
+    const { data, error } = await supabase.from('trips').upsert(trip).select().single()
+    if (error) {
+      // Older schemas may not have image_url yet — save without it rather than failing
+      if (/image_url/.test(error.message)) {
+        const { image_url, ...rest } = trip
+        const retry = await supabase.from('trips').upsert(rest).select().single()
+        if (retry.error) throw new Error(retry.error.message)
+        console.warn('Saved trip without image_url: run the latest supabase/schema.sql to enable destination photos')
+        return { ...retry.data, image_url: image_url ?? null }
+      }
+      throw new Error(error.message)
+    }
+    return data
+  }
   const d = load(); const i = d.trips.findIndex(t => t.id === trip.id); if (i >= 0) d.trips[i] = trip; else d.trips.push(trip); save(d); return trip
 }
 export async function deleteTrip(id: string) {

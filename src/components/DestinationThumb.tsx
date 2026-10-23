@@ -13,6 +13,7 @@ export default function DestinationThumb({
   name,
   lat,
   lng,
+  imageUrl,
   size = 44,
   className = 'trip-thumb',
 }: {
@@ -20,16 +21,21 @@ export default function DestinationThumb({
   name: string
   lat: number | null
   lng: number | null
+  imageUrl?: string | null
   size?: number
   className?: string
 }) {
   const [failed, setFailed] = useState(false)
-  useEffect(() => { setFailed(false) }, [lat, lng])
-  const url = lat != null && lng != null && !failed ? destinationThumbUrl(lat, lng) : null
+  useEffect(() => { setFailed(false) }, [lat, lng, imageUrl])
+
+  const photo = imageUrl && !failed ? imageUrl : null
+  const tile = !photo && lat != null && lng != null && !failed ? destinationThumbUrl(lat, lng) : null
+  const src = photo || tile
+
   return (
     <div className={className} style={{ width: size, height: size }} aria-hidden>
-      {url
-        ? <img src={url} alt="" onError={() => setFailed(true)} />
+      {src
+        ? <img src={src} alt="" onError={() => setFailed(true)} />
         : initials(place, name)}
     </div>
   )

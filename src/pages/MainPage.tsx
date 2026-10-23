@@ -15,6 +15,8 @@ import {
   tripDurationDays,
   type Trip,
 } from '../lib/types'
+import { resolveTripImage } from '../lib/tripImages'
+import { destinationTravelLinks } from '../lib/travelApps'
 
 type Mode = 'list' | 'create' | 'edit' | 'detail'
 
@@ -32,6 +34,7 @@ function blankTrip(userId: string): Trip {
     major_stops: [],
     booking_status: 'not_booked',
     created_at: new Date().toISOString(),
+    image_url: null,
   }
 }
 
@@ -83,10 +86,13 @@ function TripForm({
               key={`${r.lat}-${r.lng}-${i}`}
               type="button"
               role="option"
-              onClick={() => {
-                upd({ place: r.name, place_lat: r.lat, place_lng: r.lng })
+              onClick={async () => {
+                const next = { ...trip, place: r.name, place_lat: r.lat, place_lng: r.lng, image_url: null as string | null }
+                onChange(next)
                 setPlaceQ(r.name)
                 setResults([])
+                const img = await resolveTripImage(r.name, r.lat, r.lng)
+                onChange({ ...next, image_url: img })
               }}
             >
               {r.display}
@@ -138,10 +144,33 @@ function TripDetail({
   const duration = tripDurationDays(trip.start_date, trip.end_date)
   const stops = trip.major_stops.map(s => s.name).filter(Boolean)
 
+  const links = destinationTravelLinks(trip.place)
+
   return (
     <div className="trip-detail selected">
+      {(trip.image_url || (trip.place_lat != null && trip.place_lng != null)) && (
+        <div className="trip-detail-cover">
+          <DestinationThumb
+            place={trip.place}
+            name={trip.name}
+            lat={trip.place_lat}
+            lng={trip.place_lng}
+            imageUrl={trip.image_url}
+            size={280}
+            className="trip-detail-cover-img"
+          />
+        </div>
+      )}
       <div className="trip-detail-header">
-        <DestinationThumb place={trip.place} name={trip.name} lat={trip.place_lat} lng={trip.place_lng} size={64} className="trip-detail-thumb" />
+        <DestinationThumb
+          place={trip.place}
+          name={trip.name}
+          lat={trip.place_lat}
+          lng={trip.place_lng}
+          imageUrl={trip.image_url}
+          size={64}
+          className="trip-detail-thumb"
+        />
         <div style={{ minWidth: 0, flex: 1 }}>
           <h3>{trip.name || 'Untitled Trip'}</h3>
           <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginBottom: 8 }}>
@@ -170,6 +199,16 @@ function TripDetail({
         </div>
       )}
 
+      {links.length > 0 && (
+        <div className="travel-link-row">
+          {links.slice(0, 4).map(l => (
+            <a key={l.id} href={l.url} target="_blank" rel="noreferrer" className="travel-chip" title={l.blurb}>
+              {l.label}
+            </a>
+          ))}
+        </div>
+      )}
+
       <div className="trip-actions">
         <button type="button" className="btn-orange full" onClick={onOpen}>Open Trip</button>
         <button type="button" className="btn-secondary" onClick={onEdit}>Edit</button>
@@ -189,7 +228,21 @@ export default function MainPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
 
   useEffect(() => {
-    if (profile) api.listTrips(profile.id).then(setTrips)
+    if (!profile) return
+    api.listTrips(profile.id).then(async list => {
+      setTrips(list)
+      // Backfill destination photos for trips that have a place but no image yet
+      for (const t of list) {
+        if (t.image_url || !t.place) continue
+        const img = await resolveTripImage(t.place, t.place_lat, t.place_lng)
+        if (!img) continue
+        const updated = { ...t, image_url: img }
+        try {
+          await api.saveTrip(updated)
+          setTrips(prev => prev.map(x => x.id === t.id ? updated : x))
+        } catch { /* ignore */ }
+      }
+    })
   }, [profile])
 
   const selected = useMemo(() => trips.find(t => t.id === selectedId) ?? null, [trips, selectedId])
@@ -336,7 +389,7 @@ export default function MainPage() {
                       aria-pressed={isSelected}
                     >
                       <div className="trip-card-top">
-                        <DestinationThumb place={t.place} name={t.name} lat={t.place_lat} lng={t.place_lng} />
+                        <DestinationThumb place={t.place} name={t.name} lat={t.place_lat} lng={t.place_lng} imageUrl={t.image_url} />
                         <div className="trip-card-meta">
                           <div className="trip-card-name">{t.name || 'Untitled Trip'}</div>
                           <div className="trip-card-place">{t.place || 'No destination set'}</div>
@@ -362,6 +415,8 @@ export default function MainPage() {
           pins={pins}
           selectedId={selectedId}
           onPinClick={id => selectTrip(id)}
+          showUserLocation
+          enableNearbyPois
         >
           <button
             type="button"

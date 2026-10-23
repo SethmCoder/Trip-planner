@@ -5,6 +5,8 @@ export interface Stop { name: string; lat?: number; lng?: number }
 export interface Trip {
   id: string; user_id: string; name: string; place: string; place_lat: number | null; place_lng: number | null
   start_date: string; end_date: string; major_stops: Stop[]; booking_status: BookingStatus; created_at: string
+  /** Destination photo URL resolved from Wikipedia/Wikimedia when a place is set. */
+  image_url?: string | null
 }
 export interface ItineraryItem {
   id: string; trip_id: string; user_id: string; type: ItemType; group_id: string | null; subtype?: string | null

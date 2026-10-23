@@ -15,7 +15,10 @@ create table if not exists public.trips (
   place_lat double precision, place_lng double precision,
   start_date date, end_date date, major_stops jsonb not null default '[]'::jsonb,
   booking_status booking_status not null default 'not_booked',
+  image_url text,
   created_at timestamptz not null default now(), updated_at timestamptz not null default now());
+-- For existing projects: destination photo on trips
+alter table public.trips add column if not exists image_url text;
 
 create table if not exists public.itinerary_items (
   id uuid primary key default gen_random_uuid(),
